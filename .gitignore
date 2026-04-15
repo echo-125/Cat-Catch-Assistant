@@ -24,6 +24,7 @@ wheels/
 venv/
 ENV/
 env/
+.venv/
 
 # IDE
 .vscode/
@@ -35,10 +36,25 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Project specific
+# Project specific - Configuration
 config.json
+config.ini
+
+# Project specific - Downloaded files
 *.ts
 *.mp4
+*.mkv
+*.avi
+*.flv
 downloads/
 *_temp/
+test_temp/
+
+# Project specific - Logs
+*.log
+logs/
+
+# Claude Code settings (keep local only)
+.claude/
