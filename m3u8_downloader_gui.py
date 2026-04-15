@@ -44,6 +44,9 @@ class M3U8DownloaderGUI:
         self.root = root
         self.root.title("M3U8 视频下载器 v3.0 - 多任务版")
 
+        # 设置窗口图标
+        self.set_icon()
+
         # 加载配置
         self.config_manager = ConfigManager()
         config = self.config_manager.config
@@ -197,6 +200,22 @@ class M3U8DownloaderGUI:
         # 状态栏
         self.status_label = ttk.Label(main_frame, text="就绪 | 活动下载: 0 | 最大并发: 3")
         self.status_label.grid(row=3, column=0, sticky=tk.W, pady=(5, 0))
+
+    def set_icon(self):
+        """设置窗口图标"""
+        try:
+            # 获取图标路径（支持打包后的路径）
+            if getattr(sys, 'frozen', False):
+                # 打包后的路径
+                icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+            else:
+                # 开发环境路径
+                icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+
+            if os.path.exists(icon_path):
+                self.root.iconbitmap(icon_path)
+        except Exception as e:
+            print(f"设置图标失败: {e}")
 
     def browse_path(self):
         """浏览下载路径"""

@@ -59,7 +59,23 @@ sudo yum install ffmpeg  # CentOS/RHEL
 
 ## 🚀 使用方法
 
-### 方式一：图形界面（推荐）
+### 方式一：EXE 版本（最简单，推荐新手）
+
+**无需安装 Python，直接运行！**
+
+1. 进入 `dist/` 目录
+2. 双击运行 `CatCatchAssistant.exe`
+3. 开始使用图形界面下载视频
+
+**优点：**
+- ✅ 无需安装 Python 和依赖
+- ✅ 双击即可运行
+- ✅ 可创建桌面快捷方式
+- ✅ 便携式，可复制到任何电脑运行
+
+详细说明请查看 [EXE_README.md](EXE_README.md)
+
+### 方式二：Python 图形界面
 
 ```bash
 python m3u8_downloader_gui.py
@@ -74,7 +90,7 @@ python m3u8_downloader_gui.py
 6. 选择任务，点击"开始选中"或"全部开始"
 7. 查看实时进度和日志
 
-### 方式二：命令行
+### 方式三：命令行
 
 ```bash
 python m3u8_downloader.py <M3U8_URL> [输出文件名] [保存路径]
@@ -408,18 +424,3 @@ segment1.ts
 - 使用消息队列（Queue）通信
 - 避免界面卡顿
 - 正确处理并发
-
-## 📄 许可证
-
-MIT License
-
-## 👤 作者
-
-Claude Code - 2026-04-16
-
-## 🙏 致谢
-
-感谢所有开源项目的支持：
-- requests - HTTP请求库
-- beautifulsoup4 - HTML解析库
-- tkinter - GUI框架
