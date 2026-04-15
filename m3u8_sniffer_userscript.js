@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         猫抓助手
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  自动点击播放按钮、跳过广告，拦截广告跳转，并提取M3U8视频链接（带时长检测）
 // @author       Claude Code
 // @match        https://rouva4.xyz/*
+// @match        https://chigua.com/*
+// @match        https://blade.qtkezmpl.cc/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
@@ -12,12 +14,48 @@
 (function() {
     'use strict';
 
-    console.log('[猫抓助手] 脚本已加载 v1.4');
+    console.log('[猫抓助手] 脚本已加载 v1.5');
+
+    // 网站配置
+    const SITE_CONFIG = {
+        // rouva4.xyz 需要特殊处理
+        'rouva4.xyz': {
+            needsPlayClick: true,
+            needsAdSkip: true,
+            useIndexFilter: true,  // 使用 index.jpg 过滤
+        },
+        // chigua.com 和 blade.qtkezmpl.cc 直接嗅探
+        'chigua.com': {
+            needsPlayClick: false,
+            needsAdSkip: false,
+            useIndexFilter: false,
+            multiVideo: true,  // 支持多视频
+        },
+        'blade.qtkezmpl.cc': {
+            needsPlayClick: false,
+            needsAdSkip: false,
+            useIndexFilter: false,
+            multiVideo: true,
+        }
+    };
+
+    // 检测当前网站
+    function getCurrentSite() {
+        const hostname = window.location.hostname;
+        for (const [site, config] of Object.entries(SITE_CONFIG)) {
+            if (hostname.includes(site)) {
+                return { name: site, config };
+            }
+        }
+        return { name: 'default', config: SITE_CONFIG['rouva4.xyz'] };
+    }
+
+    const currentSite = getCurrentSite();
 
     // 配置
     const CONFIG = {
-        autoClickPlay: true,        // 自动点击播放按钮
-        autoSkipAd: true,           // 自动跳过广告
+        autoClickPlay: currentSite.config.needsPlayClick,  // 根据网站配置
+        autoSkipAd: currentSite.config.needsAdSkip,       // 根据网站配置
         adWaitTime: 6000,           // 广告等待时间（毫秒）
         showResult: true,           // 显示结果面板
         filterKeywords: ['ad', 'ads', 'adv', 'advertisement', 'silent-basis'], // 广告关键词
@@ -189,7 +227,7 @@
             <div id="m3u8-minimized-icon" title="点击展开">🐱</div>
             <div id="m3u8-panel-full">
                 <div id="m3u8-panel-header">
-                    <span>猫抓助手 v1.4</span>
+                    <span>猫抓助手 v1.5</span>
                     <div>
                         <span id="m3u8-panel-minimize" title="最小化">−</span>
                         <span id="m3u8-panel-close" title="关闭">×</span>
@@ -361,7 +399,7 @@
     }
 
     // 获取网页标题
-    function getPageTitle() {
+    function getPageTitle(videoIndex = null) {
         // 尝试多种方式获取标题
         const titleSelectors = [
             'h1',
@@ -370,21 +408,33 @@
             '[class*="video-title"]'
         ];
 
+        let title = '';
         for (const selector of titleSelectors) {
             const element = document.querySelector(selector);
             if (element && element.textContent.trim()) {
-                // 清理标题（移除特殊字符）
-                return element.textContent.trim()
-                    .replace(/[<>:"/\\|?*]/g, '_')
-                    .substring(0, 50); // 限制长度
+                title = element.textContent.trim();
+                break;
             }
         }
 
-        // 使用页面标题
-        return document.title
-            .replace(/[<>:"/\\|?*]/g, '_')
-            .substring(0, 50);
+        // 如果没找到，使用页面标题
+        if (!title) {
+            title = document.title;
+        }
+
+        // 清理标题（移除特殊字符）
+        title = title.replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
+
+        // 如果是多视频网站，添加序号
+        if (videoIndex !== null && currentSite.config.multiVideo) {
+            title = `${title}_${videoIndex}`;
+        }
+
+        return title;
     }
+
+    // 视频计数器（用于多视频网站）
+    let videoCounter = 0;
 
     // 添加URL到结果面板
     async function addUrlToPanel(url, isTarget = false) {
@@ -445,7 +495,8 @@
 
     // 复制链接和文件名
     function copyUrlWithInfo(url, duration) {
-        const title = getPageTitle();
+        // 对于多视频网站，使用已分配的序号
+        const title = getPageTitle(currentSite.config.multiVideo ? videoCounter : null);
 
         // 格式：URL|文件名（方便GUI批量导入）
         const text = `${url}|${title}`;
@@ -670,9 +721,29 @@
         if (!url) return;
 
         const urlStr = url.toString();
-        if (urlStr.includes('.m3u8') || urlStr.includes('.jpg') || urlStr.includes('index')) {
+
+        // 判断是否为M3U8链接
+        const isM3U8 = urlStr.includes('.m3u8');
+
+        // 对于不同网站使用不同的过滤策略
+        let shouldCapture = false;
+
+        if (currentSite.config.useIndexFilter) {
+            // rouva4.xyz: 使用 index.jpg 或 index.m3u8 过滤
+            shouldCapture = urlStr.includes('.m3u8') || urlStr.includes('.jpg') || urlStr.includes('index');
+        } else {
+            // chigua.com/blade.qtkezmpl.cc: 直接捕获所有 .m3u8 链接
+            shouldCapture = isM3U8;
+        }
+
+        if (shouldCapture) {
             if (!capturedUrls.has(urlStr)) {
                 capturedUrls.add(urlStr);
+
+                // 为多视频网站分配序号
+                if (currentSite.config.multiVideo && isM3U8) {
+                    videoCounter++;
+                }
 
                 if (isTargetUrl(urlStr)) {
                     updateStatus('✅ 已找到目标链接！');
@@ -681,7 +752,8 @@
                 } else if (!isAdUrl(urlStr)) {
                     const result = await addUrlToPanel(urlStr, false);
                     if (result && !result.isShort) {
-                        addLog(`捕获链接: ${urlStr.substring(0, 50)}... (时长: ${formatDuration(result.duration)})`);
+                        const videoLabel = currentSite.config.multiVideo ? `视频${videoCounter}: ` : '';
+                        addLog(`捕获${videoLabel}链接: ${urlStr.substring(0, 50)}... (时长: ${formatDuration(result.duration)})`);
                     } else if (result && result.isShort) {
                         addLog(`过滤短视频: ${urlStr.substring(0, 50)}... (${formatDuration(result.duration)})`);
                     }
@@ -848,8 +920,13 @@
         // DOM 已准备好，创建界面和启动监控
         if (CONFIG.showResult) {
             createResultPanel();
-            addLog('脚本已加载 v1.4');
+            addLog('脚本已加载 v1.5');
+            addLog(`当前网站: ${currentSite.name}`);
             addLog(`最小时长过滤: ${CONFIG.minDuration}秒`);
+
+            if (currentSite.config.multiVideo) {
+                addLog('多视频模式: 已启用（自动添加序号）');
+            }
         }
 
         addLog('广告拦截已启用');
@@ -865,6 +942,10 @@
             if (playClicked && CONFIG.autoSkipAd) {
                 await clickSkipAdButton();
             }
+        } else {
+            // 对于不需要点击播放的网站，直接显示提示
+            updateStatus('正在监控M3U8链接...');
+            addLog('等待捕获M3U8链接...');
         }
     }
 
