@@ -446,13 +446,12 @@
     // 复制链接和文件名
     function copyUrlWithInfo(url, duration) {
         const title = getPageTitle();
-        const durationStr = duration > 0 ? formatDuration(duration) : '未知时长';
 
-        // 格式：标题|时长|URL
-        const text = `${title}|${durationStr}|${url}`;
+        // 格式：URL|文件名（方便GUI批量导入）
+        const text = `${url}|${title}`;
 
         navigator.clipboard.writeText(text).then(() => {
-            alert(`已复制！\n\n标题: ${title}\n时长: ${durationStr}\n链接: ${url.substring(0, 50)}...`);
+            alert(`已复制！\n\n文件名: ${title}\n链接: ${url.substring(0, 50)}...`);
             addLog('已复制: ' + title);
         }).catch(err => {
             console.error('复制失败:', err);

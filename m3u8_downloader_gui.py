@@ -89,14 +89,23 @@ class M3U8DownloaderGUI:
         input_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         input_frame.columnconfigure(1, weight=1)
 
+        # 创建notebook用于切换单个/批量模式
+        input_notebook = ttk.Notebook(input_frame)
+        input_notebook.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E))
+
+        # 单个任务标签页
+        single_frame = ttk.Frame(input_notebook, padding="10")
+        input_notebook.add(single_frame, text="单个任务")
+        single_frame.columnconfigure(1, weight=1)
+
         # M3U8 URL
-        ttk.Label(input_frame, text="M3U8 链接:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.url_entry = ttk.Entry(input_frame, width=80)
+        ttk.Label(single_frame, text="M3U8 链接:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.url_entry = ttk.Entry(single_frame, width=80)
         self.url_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5, padx=(5, 0))
 
         # 下载路径
-        ttk.Label(input_frame, text="下载路径:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        path_frame = ttk.Frame(input_frame)
+        ttk.Label(single_frame, text="下载路径:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        path_frame = ttk.Frame(single_frame)
         path_frame.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5, padx=(5, 0))
         path_frame.columnconfigure(0, weight=1)
 
@@ -109,8 +118,8 @@ class M3U8DownloaderGUI:
         self.path_btn.grid(row=0, column=1)
 
         # 输出文件名和并发线程
-        ttk.Label(input_frame, text="输出文件名:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        output_frame = ttk.Frame(input_frame)
+        ttk.Label(single_frame, text="输出文件名:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        output_frame = ttk.Frame(single_frame)
         output_frame.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5, padx=(5, 0))
         output_frame.columnconfigure(0, weight=1)
 
@@ -125,7 +134,7 @@ class M3U8DownloaderGUI:
         thread_spinbox.grid(row=0, column=3)
 
         # 添加任务按钮
-        button_frame = ttk.Frame(input_frame)
+        button_frame = ttk.Frame(single_frame)
         button_frame.grid(row=3, column=0, columnspan=2, pady=10)
 
         self.add_btn = ttk.Button(button_frame, text="添加到下载列表", command=self.add_task, width=20)
@@ -133,6 +142,27 @@ class M3U8DownloaderGUI:
 
         self.settings_btn = ttk.Button(button_frame, text="设置", command=self.open_settings, width=10)
         self.settings_btn.grid(row=0, column=1, padx=5)
+
+        # 批量任务标签页
+        batch_frame = ttk.Frame(input_notebook, padding="10")
+        input_notebook.add(batch_frame, text="批量添加")
+        batch_frame.columnconfigure(0, weight=1)
+        batch_frame.rowconfigure(1, weight=1)
+
+        ttk.Label(batch_frame, text="每行一个任务，格式: 链接|文件名 (文件名可选)").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+
+        # 批量输入文本框
+        self.batch_text = scrolledtext.ScrolledText(batch_frame, width=80, height=6, wrap=tk.WORD)
+        self.batch_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 5))
+
+        # 批量添加按钮
+        batch_button_frame = ttk.Frame(batch_frame)
+        batch_button_frame.grid(row=2, column=0, pady=5)
+
+        self.batch_add_btn = ttk.Button(batch_button_frame, text="批量添加到列表", command=self.batch_add_tasks, width=20)
+        self.batch_add_btn.grid(row=0, column=0, padx=5)
+
+        ttk.Label(batch_button_frame, text=f"下载路径: {self.path_entry.get()}", foreground="gray").grid(row=0, column=1, padx=10)
 
         # === 任务列表区域 ===
         task_frame = ttk.LabelFrame(main_frame, text="下载任务列表", padding="10")
@@ -309,6 +339,107 @@ class M3U8DownloaderGUI:
             'download_path': output_dir,
             'max_workers': max_workers
         })
+
+    def batch_add_tasks(self):
+        """批量添加下载任务"""
+        # 获取批量输入
+        batch_text = self.batch_text.get("1.0", tk.END).strip()
+        output_dir = self.path_entry.get().strip()
+        max_workers = self.thread_var.get()
+
+        if not batch_text:
+            messagebox.showerror("错误", "请输入要添加的任务")
+            return
+
+        if not output_dir:
+            messagebox.showerror("错误", "请选择下载路径")
+            return
+
+        # 解析每一行
+        lines = batch_text.split('\n')
+        added_count = 0
+        failed_count = 0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # 解析格式: 链接|文件名 或 链接
+            parts = line.split('|')
+            m3u8_url = parts[0].strip()
+
+            # 验证URL
+            if not m3u8_url or not (m3u8_url.startswith('http://') or m3u8_url.startswith('https://')):
+                self.log(f"跳过无效链接: {line[:50]}")
+                failed_count += 1
+                continue
+
+            # 获取文件名
+            if len(parts) > 1 and parts[1].strip():
+                output_name = parts[1].strip()
+            else:
+                # 自动生成文件名
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_name = f"video_{timestamp}_{added_count}"
+
+            # 繁体转简体
+            if is_traditional(output_name):
+                original_name = output_name
+                output_name = traditional_to_simplified(output_name)
+                self.log(f"文件名转换: {original_name} → {output_name}")
+
+            # 清理文件名
+            try:
+                output_name.encode('utf-8')
+            except UnicodeEncodeError:
+                output_name = output_name.encode('utf-8', errors='ignore').decode('utf-8')
+
+            # 创建任务
+            self.task_counter += 1
+            task = DownloadTask(
+                task_id=self.task_counter,
+                url=m3u8_url,
+                output_name=output_name,
+                output_dir=output_dir,
+                max_workers=max_workers
+            )
+
+            self.tasks[task.task_id] = task
+
+            # 添加到列表
+            try:
+                display_name = f"{output_name}.mp4"
+            except:
+                display_name = f"video_{task.task_id}.mp4"
+
+            self.task_tree.insert('', 'end', iid=task.task_id, values=(
+                task.task_id,
+                display_name,
+                task.status,
+                "0%",
+                "0",
+                "0",
+                "-"
+            ))
+
+            self.log(f"添加任务 #{task.task_id}: {display_name}")
+            added_count += 1
+
+        # 清空输入
+        self.batch_text.delete("1.0", tk.END)
+
+        # 保存配置
+        self.config_manager.update({
+            'download_path': output_dir,
+            'max_workers': max_workers
+        })
+
+        # 显示结果
+        if added_count > 0:
+            messagebox.showinfo("成功", f"成功添加 {added_count} 个任务\n失败 {failed_count} 个")
+        else:
+            messagebox.showwarning("提示", "没有有效的任务被添加")
 
     def start_selected(self):
         """开始选中的任务"""
