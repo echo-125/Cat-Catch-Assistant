@@ -1,0 +1,9 @@
+# M3U8 视频下载器依赖库
+# 安装命令: pip install -r requirements.txt
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+selenium>=4.15.0
+selenium>=4.15.0

@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "Bash(python test.py)",
+      "Bash(pip install *)",
+      "Bash(python setup_chromedriver.py)",
+      "Bash(python download_chromedriver.py)",
+      "Bash(python test_chromedriver.py)",
+      "Bash(python fix_chromedriver.py)",
+      "Bash(cat \"C:\\\\\\\\Users\\\\\\\\ADMINI~1\\\\\\\\AppData\\\\\\\\Local\\\\\\\\Temp\\\\\\\\claude\\\\\\\\d--workspace-html-m3u8-rou\\\\\\\\44eb51f2-3c6e-4cde-841e-e77928f981bb\\\\\\\\tasks\\\\\\\\bp1ezlulp.output\")",
+      "Bash(python -c \"from m3u8_sniffer import M3U8Sniffer; print\\('✓ 导入成功'\\)\")",
+      "Bash(python -c \"from config_manager import ConfigManager; from m3u8_downloader_gui import M3U8DownloaderGUI; print\\('✓ 导入成功'\\)\")",
+      "Bash(python test_chinese.py)",
+      "Bash(python test_optimization.py)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
