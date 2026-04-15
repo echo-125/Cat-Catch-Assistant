@@ -5,8 +5,6 @@
 // @description  自动点击播放按钮、跳过广告，拦截广告跳转，并提取M3U8视频链接（带时长检测）
 // @author       Claude Code
 // @match        https://rouva4.xyz/*
-// @match        https://chigua.com/*
-// @match        https://blade.qtkezmpl.cc/*
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
@@ -23,19 +21,6 @@
             needsPlayClick: true,
             needsAdSkip: true,
             useIndexFilter: true,  // 使用 index.jpg 过滤
-        },
-        // chigua.com 和 blade.qtkezmpl.cc 直接嗅探
-        'chigua.com': {
-            needsPlayClick: false,
-            needsAdSkip: false,
-            useIndexFilter: false,
-            multiVideo: true,  // 支持多视频
-        },
-        'blade.qtkezmpl.cc': {
-            needsPlayClick: false,
-            needsAdSkip: false,
-            useIndexFilter: false,
-            multiVideo: true,
         }
     };
 
