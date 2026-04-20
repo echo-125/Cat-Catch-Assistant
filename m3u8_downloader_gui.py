@@ -44,7 +44,7 @@ class MsgBox:
         """显示消息框"""
         # 根据消息长度计算窗口高度
         lines = message.count('\n') + 1
-        height = max(140, 120 + lines * 20)
+        height = max(160, 130 + lines * 22)
 
         dialog = ttk.Toplevel(self.parent)
         dialog.withdraw()  # 先隐藏窗口
@@ -63,8 +63,8 @@ class MsgBox:
 
         # 居中
         self.parent.update_idletasks()
-        x = self.parent.winfo_x() + (self.parent.winfo_width() - 380) // 2
-        y = self.parent.winfo_y() + (self.parent.winfo_height() - height) // 2
+        x = self.parent.winfo_x() + (self.root.winfo_width() - 380) // 2
+        y = self.parent.winfo_y() + (self.root.winfo_height() - height) // 2
         dialog.geometry(f"+{x}+{y}")
 
         # 内容
@@ -104,7 +104,7 @@ class MsgBox:
         """显示询问框"""
         # 根据消息长度计算窗口高度
         lines = message.count('\n') + 1
-        height = max(140, 120 + lines * 20)
+        height = max(160, 130 + lines * 22)
 
         result = [False]
         dialog = ttk.Toplevel(self.parent)

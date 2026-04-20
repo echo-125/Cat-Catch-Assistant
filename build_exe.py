@@ -14,7 +14,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # PyInstaller 参数
 PyInstaller.__main__.run([
     'm3u8_downloader_gui.py',           # 主程序
-    '--name=CatCatchAssistant',          # 输出的 exe 名称
+    '--name=M3U8下载器',          # 输出的 exe 名称
     '--onefile',                         # 打包成单个 exe 文件
     '--windowed',                        # 窗口模式（不显示控制台）
     '--icon=icon.ico',                   # 应用图标
@@ -49,5 +49,5 @@ print("\n" + "="*60)
 print("✅ 打包完成！")
 print("="*60)
 print(f"📁 输出目录: {os.path.join(current_dir, 'dist')}")
-print(f"🎮 exe 文件: {os.path.join(current_dir, 'dist', 'CatCatchAssistant.exe')}")
+print(f"🎮 exe 文件: {os.path.join(current_dir, 'dist', 'M3U8下载器.exe')}")
 print("="*60)
