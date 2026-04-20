@@ -34,7 +34,6 @@ PyInstaller.__main__.run([
     '--hidden-import=bs4',
     '--hidden-import=m3u8_downloader',
     '--hidden-import=config_manager',
-    '--hidden-import=chinese_converter',
 
     # 排除不需要的模块以减小体积
     '--exclude-module=matplotlib',

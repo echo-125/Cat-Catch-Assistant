@@ -18,6 +18,15 @@ from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Optional
 
+# Windows下隐藏子进程窗口
+if sys.platform == 'win32':
+    import msvcrt
+    STARTUPINFO = subprocess.STARTUPINFO
+    STARTF_USESHOWWINDOW = subprocess.STARTF_USESHOWWINDOW
+    SW_HIDE = subprocess.SW_HIDE
+else:
+    STARTUPINFO = None
+
 
 class M3U8Downloader:
     """M3U8 视频下载器类"""
@@ -66,6 +75,9 @@ class M3U8Downloader:
         # 重试配置
         self.max_retries = 3  # 每个分片最多重试3次
         self.retry_delay = 2  # 重试延迟2秒
+
+        # 停止标志（用于取消下载）
+        self._stop_flag = False
 
     def _sanitize_filename(self, filename: str) -> str:
         """
@@ -194,6 +206,10 @@ class M3U8Downloader:
         返回:
             (序号, 本地文件路径) 或 (序号, None 表示失败)
         """
+        # 检查停止标志
+        if self._stop_flag:
+            return (index, None)
+
         # 生成本地文件名，使用 4 位数字编号（0000.ts, 0001.ts...）
         filename = f"segment_{index:04d}.ts"
         filepath = self.temp_dir / filename
@@ -207,6 +223,10 @@ class M3U8Downloader:
 
         # 重试下载
         for retry in range(self.max_retries):
+            # 每次重试前检查停止标志
+            if self._stop_flag:
+                return (index, None)
+
             try:
                 # 下载分片
                 response = requests.get(segment_url, headers=self.headers, timeout=30)
@@ -241,6 +261,8 @@ class M3U8Downloader:
                 return (index, str(filepath))
 
             except Exception as e:
+                if self._stop_flag:
+                    return (index, None)
                 if retry < self.max_retries - 1:
                     # 还有重试机会，等待后重试
                     if retry == 0:
@@ -282,10 +304,25 @@ class M3U8Downloader:
 
             # 等待所有任务完成
             for future in as_completed(future_to_index):
+                # 检查停止标志
+                if self._stop_flag:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise Exception("下载已取消")
                 index, filepath = future.result()
                 results[index] = filepath
 
         print()  # 换行
+
+        # 如果已停止，直接返回
+        if self._stop_flag:
+            raise Exception("下载已取消")
+
+        # 检查失败的分片并进行统一重试
+        failed_indices = [i for i in range(len(segment_urls)) if results.get(i) is None]
+
+        if failed_indices:
+            print(f"      发现 {len(failed_indices)} 个失败分片，开始统一重试...")
+            retry_success = self._retry_failed_segments(segment_urls, results, failed_indices)
 
         # 计算总耗时
         if self.start_time:
@@ -306,6 +343,83 @@ class M3U8Downloader:
         valid_paths = [path for path in sorted_paths if path is not None]
 
         return valid_paths
+
+    def _retry_failed_segments(self, segment_urls: List[str], results: dict, failed_indices: List[int]) -> int:
+        """
+        重试失败的分片（统一重试机制）
+
+        参数:
+            segment_urls: 所有分片 URL 列表
+            results: 下载结果字典
+            failed_indices: 失败的分片索引列表
+
+        返回:
+            重试成功的数量
+        """
+        retry_success = 0
+        max_batch_retry = 3  # 批量重试次数
+
+        for batch_retry in range(max_batch_retry):
+            if not failed_indices:
+                break
+
+            print(f"      第 {batch_retry + 1} 次批量重试 {len(failed_indices)} 个分片...")
+
+            # 重置失败计数
+            batch_failed = []
+
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_index = {
+                    executor.submit(self._retry_download_segment, segment_urls[idx], idx): idx
+                    for idx in failed_indices
+                }
+
+                for future in as_completed(future_to_index):
+                    index, filepath = future.result()
+                    if filepath:
+                        results[index] = filepath
+                        retry_success += 1
+                        self.failed_segments -= 1  # 减少失败计数
+                    else:
+                        batch_failed.append(index)
+
+            failed_indices = batch_failed
+
+            if failed_indices:
+                # 等待一段时间再重试
+                time.sleep(2)
+
+        if failed_indices:
+            print(f"      最终仍有 {len(failed_indices)} 个分片下载失败")
+
+        return retry_success
+
+    def _retry_download_segment(self, segment_url: str, index: int) -> Tuple[int, Optional[str]]:
+        """
+        重试下载单个分片（简化版，不更新进度）
+
+        参数:
+            segment_url: TS 分片的 URL
+            index: 分片序号
+
+        返回:
+            (序号, 本地文件路径) 或 (序号, None 表示失败)
+        """
+        filename = f"segment_{index:04d}.ts"
+        filepath = self.temp_dir / filename
+
+        try:
+            response = requests.get(segment_url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+
+            self.downloaded_segments += 1
+            return (index, str(filepath))
+
+        except Exception:
+            return (index, None)
 
     def merge_segments(self, segment_paths: List[str]) -> str:
         """
@@ -337,6 +451,15 @@ class M3U8Downloader:
 
         return merged_file
 
+    def _get_hidden_startupinfo(self):
+        """获取隐藏窗口的启动信息（Windows）"""
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            return startupinfo
+        return None
+
     def convert_to_mp4(self, input_file: str) -> str:
         """
         将 TS 文件转换为 MP4 格式（使用 ffmpeg）
@@ -351,12 +474,16 @@ class M3U8Downloader:
 
         output_file = str(self.output_dir / f"{self.output_name}.mp4")
 
+        # 获取隐藏窗口的启动信息
+        startupinfo = self._get_hidden_startupinfo()
+
         # 检查 ffmpeg 是否可用
         try:
             subprocess.run(['ffmpeg', '-version'],
                          stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE,
-                         check=True)
+                         check=True,
+                         startupinfo=startupinfo)
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("      警告: 未找到 ffmpeg，跳过转换")
             print(f"      你可以手动使用 ffmpeg 转换: ffmpeg -i {input_file} -c copy {output_file}")
@@ -372,12 +499,13 @@ class M3U8Downloader:
         ]
 
         try:
-            # 执行转换命令
+            # 执行转换命令（隐藏窗口）
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=True
+                check=True,
+                startupinfo=startupinfo
             )
 
             print(f"      转换完成: {output_file}")

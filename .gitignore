@@ -19,6 +19,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+pip-log.txt
+pip-delete-this-directory.txt
 
 # Virtual Environment
 venv/
@@ -26,21 +28,37 @@ ENV/
 env/
 .venv/
 
-# IDE
+# IDE / Editor
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+*.sublime-*
 
 # OS
 .DS_Store
 Thumbs.db
 desktop.ini
+*.lnk
 
-# Project specific - Configuration
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# PyInstaller
+*.manifest
+*.spec.bak
+
+# Project specific - Configuration (user settings)
 config.json
-config.ini
 
 # Project specific - Downloaded files
 *.ts
@@ -48,7 +66,7 @@ config.ini
 *.mkv
 *.avi
 *.flv
-downloads/
+*.webm
 *_temp/
 test_temp/
 
@@ -56,5 +74,14 @@ test_temp/
 *.log
 logs/
 
-# Claude Code settings (keep local only)
-.claude/
+# Project specific - Test files
+test_*.py
+check_*.py
+
+# Project specific - Temporary
+*.tmp
+*.bak
+*.orig
+
+# Claude Code (keep local settings only)
+.claude/settings.local.json
