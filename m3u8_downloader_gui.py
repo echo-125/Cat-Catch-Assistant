@@ -12,10 +12,9 @@ from ttkbootstrap.tooltip import ToolTip
 import threading
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
-from queue import Queue
+from typing import Dict, List, Optional, Tuple
+from queue import Queue, Empty
 
 from m3u8_downloader import M3U8Downloader
 from config_manager import ConfigManager
@@ -31,22 +30,20 @@ class MsgBox:
         'question': ('?', 'primary')
     }
 
-    def __init__(self, parent):
+    def __init__(self, parent: ttk.Window):
         self.parent = parent
         self._icon_path = self._get_icon_path()
 
     def _get_icon_path(self) -> Optional[str]:
         """获取图标路径"""
         try:
-            if getattr(sys, 'frozen', False):
-                icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
-            else:
-                icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+            base_path = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
+            icon_path = os.path.join(base_path, 'icon.ico')
             return icon_path if os.path.exists(icon_path) else None
         except OSError:
             return None
 
-    def _create_dialog(self, title: str, message: str, height: int) -> ttk.Toplevel:
+    def _create_dialog(self, title: str, height: int) -> ttk.Toplevel:
         """创建对话框基础框架"""
         dialog = ttk.Toplevel(self.parent)
         dialog.withdraw()
@@ -69,20 +66,13 @@ class MsgBox:
 
         return dialog
 
-    def show_info(self, message: str, title: str = "提示"):
-        self._show(title, message, 'info')
-
-    def show_warning(self, message: str, title: str = "警告"):
-        self._show(title, message, 'warning')
-
-    def show_error(self, message: str, title: str = "错误"):
-        self._show(title, message, 'error')
-
-    def _show(self, title: str, message: str, icon_type: str):
-        """显示消息框"""
+    def _show(self, title: str, message: str, icon_type: str, buttons: List[Tuple[str, str, Optional[callable]]] = None) -> Optional[bool]:
+        """显示对话框"""
         lines = message.count('\n') + 1
         height = max(160, 130 + lines * 22)
-        dialog = self._create_dialog(title, message, height)
+        dialog = self._create_dialog(title, height)
+
+        result = [None]
 
         frame = ttk.Frame(dialog, padding=20)
         frame.pack(fill=BOTH, expand=YES)
@@ -94,41 +84,47 @@ class MsgBox:
         ttk.Label(msg_frame, text=icon_char, font=('Segoe UI', 24), bootstyle=bootstyle).pack(side=LEFT, padx=(0, 15))
         ttk.Label(msg_frame, text=message, font=('Segoe UI', 10), wraplength=280).pack(side=LEFT, fill=X, expand=YES)
 
-        ttk.Button(frame, text="确定", command=dialog.destroy, bootstyle='primary', width=10).pack(pady=15)
-
-        dialog.deiconify()
-        dialog.wait_window()
-
-    def yesno(self, message: str, title: str = "确认") -> bool:
-        """显示询问框"""
-        lines = message.count('\n') + 1
-        height = max(160, 130 + lines * 22)
-        dialog = self._create_dialog(title, message, height)
-
-        result = [False]
-
-        frame = ttk.Frame(dialog, padding=20)
-        frame.pack(fill=BOTH, expand=YES)
-
-        msg_frame = ttk.Frame(frame)
-        msg_frame.pack(fill=BOTH, expand=YES)
-
-        ttk.Label(msg_frame, text='?', font=('Segoe UI', 24), bootstyle='primary').pack(side=LEFT, padx=(0, 15))
-        ttk.Label(msg_frame, text=message, font=('Segoe UI', 10), wraplength=280).pack(side=LEFT, fill=X, expand=YES)
-
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(pady=15)
 
-        ttk.Button(btn_frame, text="是", command=lambda: [result.__setitem__(0, True), dialog.destroy()], bootstyle='primary', width=8).pack(side=LEFT, padx=5)
-        ttk.Button(btn_frame, text="否", command=dialog.destroy, width=8).pack(side=LEFT, padx=5)
+        if buttons is None:
+            buttons = [("确定", 'primary', None)]
+
+        for i, (text, style, callback) in enumerate(buttons):
+            def on_click(cb=callback, idx=i):
+                if cb:
+                    cb()
+                result[0] = idx == 0
+                dialog.destroy()
+
+            ttk.Button(btn_frame, text=text, command=on_click, bootstyle=style, width=8).pack(side=LEFT, padx=5)
 
         dialog.deiconify()
         dialog.wait_window()
         return result[0]
 
+    def show_info(self, message: str, title: str = "提示"):
+        self._show(title, message, 'info')
+
+    def show_warning(self, message: str, title: str = "警告"):
+        self._show(title, message, 'warning')
+
+    def show_error(self, message: str, title: str = "错误"):
+        self._show(title, message, 'error')
+
+    def yesno(self, message: str, title: str = "确认") -> bool:
+        return self._show(title, message, 'question', [
+            ("是", 'primary', None),
+            ("否", 'secondary', None)
+        ]) or False
+
 
 class DownloadTask:
     """下载任务"""
+
+    __slots__ = ('task_id', 'url', 'output_name', 'output_dir', 'max_workers',
+                 'status', 'progress', 'downloaded', 'total', 'message',
+                 'downloader', 'thread', '_stop_flag')
 
     def __init__(self, task_id: int, url: str, output_name: str, output_dir: str, max_workers: int):
         self.task_id = task_id
@@ -145,11 +141,22 @@ class DownloadTask:
         self.thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
 
+    def reset(self):
+        """重置任务状态"""
+        self.status = "等待中"
+        self.progress = 0.0
+        self.downloaded = 0
+        self.total = 0
+        self.message = ""
+        self._stop_flag.clear()
+
 
 class M3U8DownloaderGUI:
     """M3U8 下载器图形界面"""
 
     MAX_LOG_LINES = 500
+    STARTABLE_STATUSES = ("等待中", "已暂停", "已失败", "已取消")
+    FINISHED_STATUSES = ("已完成", "已失败", "已取消")
 
     def __init__(self, root: ttk.Window):
         self.root = root
@@ -160,8 +167,7 @@ class M3U8DownloaderGUI:
         self.config_manager = ConfigManager()
         config = self.config_manager.config
 
-        geometry = config.get('window_geometry', '1000x680')
-        self.root.geometry(geometry)
+        self.root.geometry(config.get('window_geometry', '1000x680'))
         self.root.minsize(800, 550)
 
         self.tasks: Dict[int, DownloadTask] = {}
@@ -195,26 +201,10 @@ class M3U8DownloaderGUI:
         title_frame = ttk.Frame(header)
         title_frame.pack(side=LEFT)
 
-        ttk.Label(
-            title_frame,
-            text="M3U8 视频下载器",
-            font=('Segoe UI', 16, 'bold'),
-            bootstyle='primary'
-        ).pack(side=LEFT)
+        ttk.Label(title_frame, text="M3U8 视频下载器", font=('Segoe UI', 16, 'bold'), bootstyle='primary').pack(side=LEFT)
+        ttk.Label(title_frame, text="v3.2", font=('Segoe UI', 9), bootstyle='secondary').pack(side=LEFT, padx=(6, 0), pady=(7, 0))
 
-        ttk.Label(
-            title_frame,
-            text="v3.1",
-            font=('Segoe UI', 9),
-            bootstyle='secondary'
-        ).pack(side=LEFT, padx=(6, 0), pady=(7, 0))
-
-        ttk.Button(
-            header,
-            text="设置",
-            command=self._open_settings,
-            width=8
-        ).pack(side=RIGHT)
+        ttk.Button(header, text="设置", command=self._open_settings, width=8).pack(side=RIGHT)
 
     def _create_input_section(self, parent: ttk.Frame):
         """创建输入区域"""
@@ -278,9 +268,7 @@ class M3U8DownloaderGUI:
         batch_frame = ttk.Frame(notebook, padding=12)
         notebook.add(batch_frame, text="批量添加")
 
-        ttk.Label(
-            batch_frame, text="每行一个任务，格式: 链接|文件名 (文件名可选)", bootstyle='secondary'
-        ).pack(anchor=W, pady=(0, 6))
+        ttk.Label(batch_frame, text="每行一个任务，格式: 链接|文件名 (文件名可选)", bootstyle='secondary').pack(anchor=W, pady=(0, 6))
 
         self.batch_text = ScrolledText(batch_frame, height=4, autohide=True)
         self.batch_text.pack(fill=X, expand=YES, pady=(0, 8))
@@ -288,14 +276,10 @@ class M3U8DownloaderGUI:
         batch_btn_row = ttk.Frame(batch_frame)
         batch_btn_row.pack(fill=X)
 
-        self.batch_path_label = ttk.Label(
-            batch_btn_row, text=f"保存至: {self.path_entry.get()}", bootstyle='secondary'
-        )
+        self.batch_path_label = ttk.Label(batch_btn_row, text=f"保存至: {self.path_entry.get()}", bootstyle='secondary')
         self.batch_path_label.pack(side=LEFT)
 
-        ttk.Button(
-            batch_btn_row, text="批量添加", command=self._batch_add_tasks, bootstyle='primary', width=12
-        ).pack(side=RIGHT)
+        ttk.Button(batch_btn_row, text="批量添加", command=self._batch_add_tasks, bootstyle='primary', width=12).pack(side=RIGHT)
 
     def _create_task_section(self, parent: ttk.Frame):
         """创建任务列表区域"""
@@ -308,59 +292,54 @@ class M3U8DownloaderGUI:
         left_btns = ttk.Frame(toolbar)
         left_btns.pack(side=LEFT)
 
-        start_btn = ttk.Button(left_btns, text="开始", command=self._start_selected, width=6)
-        start_btn.pack(side=LEFT, padx=(0, 4))
-        ToolTip(start_btn, text="开始选中的任务")
-
-        start_all_btn = ttk.Button(left_btns, text="全部开始", command=self._start_all, width=8)
-        start_all_btn.pack(side=LEFT, padx=4)
-        ToolTip(start_all_btn, text="开始所有等待中的任务")
-
-        ttk.Separator(left_btns, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=8)
-
-        cancel_btn = ttk.Button(left_btns, text="取消", command=self._pause_selected, width=6)
-        cancel_btn.pack(side=LEFT, padx=4)
-        ToolTip(cancel_btn, text="取消选中的下载任务")
-
-        retry_btn = ttk.Button(left_btns, text="重试", command=self._retry_failed, width=6)
-        retry_btn.pack(side=LEFT, padx=4)
-        ToolTip(retry_btn, text="重试失败的任务")
+        btn_configs = [
+            ("开始", self._start_selected, "开始选中的任务", 6),
+            ("全部开始", self._start_all, "开始所有等待中的任务", 8),
+        ]
+        for text, cmd, tip, width in btn_configs:
+            btn = ttk.Button(left_btns, text=text, command=cmd, width=width)
+            btn.pack(side=LEFT, padx=(0, 4))
+            ToolTip(btn, text=tip)
 
         ttk.Separator(left_btns, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=8)
 
-        remove_btn = ttk.Button(left_btns, text="删除", command=self._remove_selected, width=6)
-        remove_btn.pack(side=LEFT, padx=4)
-        ToolTip(remove_btn, text="删除选中的任务")
+        btn_configs2 = [
+            ("取消", self._pause_selected, "取消选中的下载任务"),
+            ("重试", self._retry_failed, "重试失败的任务"),
+        ]
+        for text, cmd, tip in btn_configs2:
+            btn = ttk.Button(left_btns, text=text, command=cmd, width=6)
+            btn.pack(side=LEFT, padx=4)
+            ToolTip(btn, text=tip)
 
-        clear_btn = ttk.Button(left_btns, text="清除", command=self._clear_completed, width=6)
-        clear_btn.pack(side=LEFT, padx=4)
-        ToolTip(clear_btn, text="清除已完成/失败的任务")
+        ttk.Separator(left_btns, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=8)
+
+        btn_configs3 = [
+            ("删除", self._remove_selected, "删除选中的任务"),
+            ("清除", self._clear_completed, "清除已完成/失败的任务"),
+        ]
+        for text, cmd, tip in btn_configs3:
+            btn = ttk.Button(left_btns, text=text, command=cmd, width=6)
+            btn.pack(side=LEFT, padx=4)
+            ToolTip(btn, text=tip)
 
         self.stats_label = ttk.Label(toolbar, text="", bootstyle='secondary')
         self.stats_label.pack(side=RIGHT)
         self._update_stats()
 
         columns = ('id', 'filename', 'status', 'progress', 'speed')
-        self.task_tree = ttk.Treeview(
-            task_card,
-            columns=columns,
-            show='headings',
-            height=8,
-            bootstyle='info',
-            selectmode='extended'
-        )
+        self.task_tree = ttk.Treeview(task_card, columns=columns, show='headings', height=8, bootstyle='info', selectmode='extended')
 
-        self.task_tree.heading('id', text='#', anchor=CENTER)
-        self.task_tree.heading('filename', text='文件名', anchor=W)
-        self.task_tree.heading('status', text='状态', anchor=CENTER)
-        self.task_tree.heading('progress', text='进度', anchor=CENTER)
-        self.task_tree.heading('speed', text='速度', anchor=CENTER)
-
-        self.task_tree.column('id', width=40, anchor=CENTER)
-        self.task_tree.column('filename', width=350, anchor=W)
-        self.task_tree.column('status', width=80, anchor=CENTER)
-        self.task_tree.column('progress', width=100, anchor=CENTER)
-        self.task_tree.column('speed', width=100, anchor=CENTER)
+        col_configs = [
+            ('id', '#', CENTER, 40),
+            ('filename', '文件名', W, 350),
+            ('status', '状态', CENTER, 80),
+            ('progress', '进度', CENTER, 100),
+            ('speed', '速度', CENTER, 100),
+        ]
+        for col_id, text, anchor, width in col_configs:
+            self.task_tree.heading(col_id, text=text, anchor=anchor)
+            self.task_tree.column(col_id, width=width, anchor=anchor)
 
         scrollbar = ttk.Scrollbar(task_card, orient=VERTICAL, command=self.task_tree.yview)
         self.task_tree.configure(yscrollcommand=scrollbar.set)
@@ -377,14 +356,21 @@ class M3U8DownloaderGUI:
     def _create_context_menu(self):
         """创建右键菜单"""
         self.context_menu = ttk.Menu(self.root, tearoff=0)
-        self.context_menu.add_command(label="开始", command=self._start_selected)
-        self.context_menu.add_command(label="取消", command=self._pause_selected)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(label="重试", command=self._retry_failed)
-        self.context_menu.add_command(label="删除", command=self._remove_selected)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(label="复制链接", command=self._copy_task_url)
-        self.context_menu.add_command(label="打开目录", command=self._open_task_folder)
+        menu_items = [
+            ("开始", self._start_selected),
+            ("取消", self._pause_selected),
+            None,
+            ("重试", self._retry_failed),
+            ("删除", self._remove_selected),
+            None,
+            ("复制链接", self._copy_task_url),
+            ("打开目录", self._open_task_folder),
+        ]
+        for item in menu_items:
+            if item is None:
+                self.context_menu.add_separator()
+            else:
+                self.context_menu.add_command(label=item[0], command=item[1])
 
         self.task_tree.bind('<Button-3>', self._show_context_menu)
 
@@ -397,35 +383,33 @@ class M3U8DownloaderGUI:
 
     def _on_task_double_click(self, event):
         """双击任务"""
+        task = self._get_selected_task()
+        if task:
+            if task.status in self.STARTABLE_STATUSES:
+                self._start_selected()
+            elif task.status == "下载中":
+                self._pause_selected()
+
+    def _get_selected_task(self) -> Optional[DownloadTask]:
+        """获取单个选中的任务"""
         selection = self.task_tree.selection()
         if selection:
-            task_id = int(selection[0])
-            task = self.tasks.get(task_id)
-            if task:
-                if task.status in ["等待中", "已暂停", "已失败", "已取消"]:
-                    self._start_selected()
-                elif task.status == "下载中":
-                    self._pause_selected()
+            return self.tasks.get(int(selection[0]))
+        return None
 
     def _copy_task_url(self):
         """复制任务链接"""
-        selection = self.task_tree.selection()
-        if selection:
-            task_id = int(selection[0])
-            task = self.tasks.get(task_id)
-            if task:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(task.url)
-                self._log(f"已复制链接: {task.url[:50]}...")
+        task = self._get_selected_task()
+        if task:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(task.url)
+            self._log(f"已复制链接: {task.url[:50]}...")
 
     def _open_task_folder(self):
         """打开任务目录"""
-        selection = self.task_tree.selection()
-        if selection:
-            task_id = int(selection[0])
-            task = self.tasks.get(task_id)
-            if task and os.path.exists(task.output_dir):
-                os.startfile(task.output_dir)
+        task = self._get_selected_task()
+        if task and os.path.exists(task.output_dir):
+            os.startfile(task.output_dir)
 
     def _create_status_bar(self, parent: ttk.Frame):
         """创建底部区域"""
@@ -438,41 +422,37 @@ class M3U8DownloaderGUI:
         self.log_text = ScrolledText(log_frame, height=4, autohide=True)
         self.log_text.pack(fill=BOTH, expand=YES)
 
-        self.status_label = ttk.Label(
-            bottom_frame,
-            text="就绪",
-            bootstyle='secondary',
-            font=('Segoe UI', 9)
-        )
+        self.status_label = ttk.Label(bottom_frame, text="就绪", bootstyle='secondary', font=('Segoe UI', 9))
         self.status_label.pack(anchor=W)
 
     def _bind_shortcuts(self):
         """绑定快捷键"""
-        self.root.bind('<Control-v>', lambda e: self._paste_from_clipboard())
-        self.root.bind('<Control-Return>', lambda e: self._add_task())
-        self.root.bind('<F5>', lambda e: self._start_all())
-        self.root.bind('<Escape>', lambda e: self._pause_selected())
+        shortcuts = [
+            ('<Control-v>', lambda e: self._paste_from_clipboard()),
+            ('<Control-Return>', lambda e: self._add_task()),
+            ('<F5>', lambda e: self._start_all()),
+            ('<Escape>', lambda e: self._pause_selected()),
+        ]
+        for key, cmd in shortcuts:
+            self.root.bind(key, cmd)
 
     def _update_stats(self):
         """更新统计信息"""
-        total = len(self.tasks)
-        waiting = sum(1 for t in self.tasks.values() if t.status == "等待中")
-        downloading = sum(1 for t in self.tasks.values() if t.status == "下载中")
-        completed = sum(1 for t in self.tasks.values() if t.status == "已完成")
-        failed = sum(1 for t in self.tasks.values() if t.status == "已失败")
+        status_counts = {}
+        for t in self.tasks.values():
+            status_counts[t.status] = status_counts.get(t.status, 0) + 1
 
         self.stats_label.config(
-            text=f"共 {total} 个任务 | 下载中: {downloading} | 等待: {waiting} | 完成: {completed} | 失败: {failed}"
+            text=f"共 {len(self.tasks)} 个任务 | 下载中: {status_counts.get('下载中', 0)} | "
+                 f"等待: {status_counts.get('等待中', 0)} | 完成: {status_counts.get('已完成', 0)} | "
+                 f"失败: {status_counts.get('已失败', 0)}"
         )
 
     def _set_window_icon(self, window):
         """设置窗口图标"""
         try:
-            if getattr(sys, 'frozen', False):
-                icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
-            else:
-                icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
-
+            base_path = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(__file__)
+            icon_path = os.path.join(base_path, 'icon.ico')
             if os.path.exists(icon_path):
                 window.iconbitmap(icon_path)
         except OSError:
@@ -528,12 +508,15 @@ class M3U8DownloaderGUI:
         """将任务插入到树形列表"""
         self.tasks[task.task_id] = task
         self.task_tree.insert('', 'end', iid=task.task_id, values=(
-            task.task_id,
-            f"{task.output_name}.mp4",
-            task.status,
-            "0%",
-            "-"
+            task.task_id, f"{task.output_name}.mp4", task.status, "0%", "-"
         ))
+
+    def _save_config(self, output_dir: str, max_workers: int):
+        """保存配置"""
+        self.config_manager.update({
+            'download_path': output_dir,
+            'max_workers': max_workers
+        })
 
     def _add_task(self):
         """添加下载任务"""
@@ -545,7 +528,6 @@ class M3U8DownloaderGUI:
         if not m3u8_url:
             self.msgbox.show_error("请输入 M3U8 链接", "错误")
             return
-
         if not output_dir:
             self.msgbox.show_error("请选择下载路径", "错误")
             return
@@ -560,10 +542,7 @@ class M3U8DownloaderGUI:
         self.output_entry.delete(0, 'end')
         self.url_entry.focus()
 
-        self.config_manager.update({
-            'download_path': output_dir,
-            'max_workers': max_workers
-        })
+        self._save_config(output_dir, max_workers)
 
     def _batch_add_tasks(self):
         """批量添加下载任务"""
@@ -574,7 +553,6 @@ class M3U8DownloaderGUI:
         if not batch_text:
             self.msgbox.show_error("请输入要添加的任务", "错误")
             return
-
         if not output_dir:
             self.msgbox.show_error("请选择下载路径", "错误")
             return
@@ -602,11 +580,7 @@ class M3U8DownloaderGUI:
         self.batch_text.delete("1.0", 'end')
         self._log(f"批量添加: {added_count} 个任务")
         self._update_stats()
-
-        self.config_manager.update({
-            'download_path': output_dir,
-            'max_workers': max_workers
-        })
+        self._save_config(output_dir, max_workers)
 
         if added_count > 0:
             self.msgbox.show_info(f"成功添加 {added_count} 个任务\n跳过 {failed_count} 个无效链接", "完成")
@@ -652,68 +626,62 @@ class M3U8DownloaderGUI:
 
         self._log(f"粘贴添加: {len(valid_tasks)} 个任务")
         self._update_stats()
-
-        self.config_manager.update({
-            'download_path': output_dir,
-            'max_workers': max_workers
-        })
+        self._save_config(output_dir, max_workers)
 
         self.msgbox.show_info(f"成功添加 {len(valid_tasks)} 个任务", "完成")
 
-    def _start_selected(self):
-        """开始选中的任务"""
-        selection = self.task_tree.selection()
-        if not selection:
-            self.msgbox.show_warning("请先选择任务", "提示")
-            return
+    def _get_startable_tasks(self, selection_only: bool = False) -> List[DownloadTask]:
+        """获取可启动的任务"""
+        if selection_only:
+            selection = self.task_tree.selection()
+            if not selection:
+                return []
+            return [
+                self.tasks[int(task_id)]
+                for task_id in selection
+                if self.tasks.get(int(task_id)) and self.tasks[int(task_id)].status in self.STARTABLE_STATUSES
+            ]
+        return [t for t in self.tasks.values() if t.status in self.STARTABLE_STATUSES]
 
-        startable_tasks = [
-            self.tasks[int(task_id)]
-            for task_id in selection
-            if self.tasks.get(int(task_id)) and self.tasks[int(task_id)].status in ["等待中", "已暂停", "已失败", "已取消"]
-        ]
-
-        if not startable_tasks:
-            return
-
-        available_slots = self.max_concurrent - self.active_downloads
-        if available_slots <= 0:
-            self.msgbox.show_warning(f"已达到最大并发数 {self.max_concurrent}", "提示")
-            return
-
+    def _start_tasks(self, tasks: List[DownloadTask]) -> int:
+        """启动多个任务，返回实际启动数量"""
         started = 0
-        for task in startable_tasks:
+        for task in tasks:
             if self.active_downloads >= self.max_concurrent:
                 break
             self._start_task(task)
             started += 1
+        return started
 
+    def _start_selected(self):
+        """开始选中的任务"""
+        startable_tasks = self._get_startable_tasks(selection_only=True)
+        if not startable_tasks:
+            if self.task_tree.selection():
+                return
+            self.msgbox.show_warning("请先选择任务", "提示")
+            return
+
+        if self.active_downloads >= self.max_concurrent:
+            self.msgbox.show_warning(f"已达到最大并发数 {self.max_concurrent}", "提示")
+            return
+
+        started = self._start_tasks(startable_tasks)
         if started > 0:
             self._log(f"开始下载: {started} 个任务")
 
     def _start_all(self):
         """开始所有等待中的任务"""
-        startable_tasks = [
-            task for task in self.tasks.values()
-            if task.status in ["等待中", "已暂停", "已失败", "已取消"]
-        ]
-
+        startable_tasks = self._get_startable_tasks()
         if not startable_tasks:
             self.msgbox.show_info("没有等待中的任务", "提示")
             return
 
-        available_slots = self.max_concurrent - self.active_downloads
-        if available_slots <= 0:
+        if self.active_downloads >= self.max_concurrent:
             self.msgbox.show_warning(f"已达到最大并发数 {self.max_concurrent}", "提示")
             return
 
-        started = 0
-        for task in startable_tasks:
-            if self.active_downloads >= self.max_concurrent:
-                break
-            self._start_task(task)
-            started += 1
-
+        started = self._start_tasks(startable_tasks)
         self._log(f"全部开始: {started} 个任务")
 
     def _start_task(self, task: DownloadTask):
@@ -722,11 +690,7 @@ class M3U8DownloaderGUI:
         task._stop_flag.clear()
         self._update_task_display(task)
 
-        task.thread = threading.Thread(
-            target=self._download_thread,
-            args=(task,),
-            daemon=True
-        )
+        task.thread = threading.Thread(target=self._download_thread, args=(task,), daemon=True)
         task.thread.start()
 
         with self._lock:
@@ -737,19 +701,13 @@ class M3U8DownloaderGUI:
     def _download_thread(self, task: DownloadTask):
         """下载线程"""
         try:
-            task.downloader = M3U8Downloader(
-                task.url,
-                task.output_name,
-                task.max_workers,
-                task.output_dir
-            )
+            task.downloader = M3U8Downloader(task.url, task.output_name, task.max_workers, task.output_dir)
 
             def progress_callback(current: int, total: int, message: str):
                 if task._stop_flag.is_set():
                     if task.downloader:
                         task.downloader.stop()
                     return
-
                 task.downloaded = current
                 task.total = total
                 if total > 0:
@@ -758,7 +716,6 @@ class M3U8DownloaderGUI:
                 self.message_queue.put(('progress', task.task_id))
 
             task.downloader.progress_callback = progress_callback
-
             task.downloader.download(auto_cleanup=True)
 
             if task._stop_flag.is_set():
@@ -812,10 +769,11 @@ class M3U8DownloaderGUI:
 
         removed = 0
         for task_id in selection:
-            task = self.tasks.get(int(task_id))
+            tid = int(task_id)
+            task = self.tasks.get(tid)
             if task and task.status != "下载中":
-                del self.tasks[int(task_id)]
-                self.task_tree.delete(int(task_id))
+                del self.tasks[tid]
+                self.task_tree.delete(tid)
                 removed += 1
 
         if removed > 0:
@@ -824,10 +782,7 @@ class M3U8DownloaderGUI:
 
     def _clear_completed(self):
         """清除已完成的任务"""
-        completed_ids = [
-            task_id for task_id, task in self.tasks.items()
-            if task.status in ["已完成", "已失败", "已取消"]
-        ]
+        completed_ids = [tid for tid, t in self.tasks.items() if t.status in self.FINISHED_STATUSES]
 
         for task_id in completed_ids:
             del self.tasks[task_id]
@@ -839,17 +794,13 @@ class M3U8DownloaderGUI:
 
     def _retry_failed(self):
         """重试失败的任务"""
-        failed_tasks = [
-            task for task in self.tasks.values()
-            if task.status in ["已失败", "已取消"]
-        ]
+        failed_tasks = [t for t in self.tasks.values() if t.status in self.FINISHED_STATUSES]
 
         if not failed_tasks:
             self.msgbox.show_info("没有失败的任务需要重试", "提示")
             return
 
-        available_slots = self.max_concurrent - self.active_downloads
-        if available_slots <= 0:
+        if self.active_downloads >= self.max_concurrent:
             self.msgbox.show_warning(f"已达到最大并发数 {self.max_concurrent}", "提示")
             return
 
@@ -857,14 +808,7 @@ class M3U8DownloaderGUI:
         for task in failed_tasks:
             if self.active_downloads >= self.max_concurrent:
                 break
-
-            task.status = "等待中"
-            task.progress = 0
-            task.downloaded = 0
-            task.total = 0
-            task.message = ""
-            task._stop_flag.clear()
-
+            task.reset()
             self._update_task_display(task)
             self._start_task(task)
             started += 1
@@ -878,18 +822,12 @@ class M3U8DownloaderGUI:
             progress_str = f"{task.progress:.1f}%" if task.total > 0 else f"{task.downloaded}"
 
             self.task_tree.item(task.task_id, values=(
-                task.task_id,
-                f"{task.output_name}.mp4",
-                task.status,
-                progress_str,
-                speed_str
+                task.task_id, f"{task.output_name}.mp4", task.status, progress_str, speed_str
             ))
 
     def _update_status(self):
         """更新状态栏"""
-        self.status_label.config(
-            text=f"活动下载: {self.active_downloads} | 最大并发: {self.max_concurrent}"
-        )
+        self.status_label.config(text=f"活动下载: {self.active_downloads} | 最大并发: {self.max_concurrent}")
 
     def _start_waiting_tasks(self):
         """检查并启动等待中的任务"""
@@ -937,7 +875,7 @@ class M3U8DownloaderGUI:
                     self._update_status()
                     self._start_waiting_tasks()
 
-        except Exception:
+        except Empty:
             pass
 
         self.root.after(100, self._process_messages)
@@ -951,7 +889,6 @@ class M3U8DownloaderGUI:
         settings_window.resizable(False, False)
 
         self._set_window_icon(settings_window)
-
         settings_window.transient(self.root)
         settings_window.grab_set()
 
@@ -995,10 +932,9 @@ class M3U8DownloaderGUI:
 
     def on_closing(self):
         """窗口关闭事件"""
-        geometry = self.root.geometry()
-        self.config_manager.set('window_geometry', geometry)
+        self.config_manager.set('window_geometry', self.root.geometry())
 
-        downloading = [task for task in self.tasks.values() if task.status == "下载中"]
+        downloading = [t for t in self.tasks.values() if t.status == "下载中"]
         if downloading:
             if self.msgbox.yesno(f"还有 {len(downloading)} 个任务正在下载，确定要退出吗？", "确认退出"):
                 self.root.destroy()
