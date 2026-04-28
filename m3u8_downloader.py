@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+import threading
 import requests
 import subprocess
 from pathlib import Path
@@ -29,6 +30,7 @@ class M3U8Downloader:
     """M3U8 视频下载器"""
 
     ILLEGAL_CHARS = r'[<>:"/\\|?*]'
+    MAX_PLAYLIST_DEPTH = 5
 
     def __init__(
         self,
@@ -51,9 +53,6 @@ class M3U8Downloader:
             'Accept-Charset': 'utf-8, big5, gb2312, gbk'
         }
 
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-
         self.total_segments = 0
         self.downloaded_segments = 0
         self.failed_segments = 0
@@ -66,6 +65,32 @@ class M3U8Downloader:
         self.retry_delay = 2
 
         self._stop_flag = False
+        self._stats_lock = threading.Lock()
+        self._session_lock = threading.Lock()
+        self._thread_local = threading.local()
+        self._sessions: list[requests.Session] = []
+
+    def _get_session(self) -> requests.Session:
+        """为当前线程获取独立的 HTTP 会话。"""
+        session = getattr(self._thread_local, 'session', None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update(self.headers)
+            self._thread_local.session = session
+            with self._session_lock:
+                self._sessions.append(session)
+        return session
+
+    def _mark_segment_failed(self):
+        """记录失败分片计数。"""
+        with self._stats_lock:
+            self.failed_segments += 1
+
+    def _mark_segment_recovered(self):
+        """记录重试成功后的计数回滚。"""
+        with self._stats_lock:
+            if self.failed_segments > 0:
+                self.failed_segments -= 1
 
     def _sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除非法字符"""
@@ -77,11 +102,17 @@ class M3U8Downloader:
 
         return filename
 
-    def download_m3u8_content(self) -> str:
-        """下载 M3U8 播放列表内容"""
-        print(f"[1/5] 正在下载播放列表: {self.m3u8_url}")
+    def _is_m3u8_reference(self, url: str) -> bool:
+        """判断资源是否仍然是 m3u8 播放列表。"""
+        return url.split('?', 1)[0].lower().endswith('.m3u8')
 
-        response = self.session.get(self.m3u8_url, timeout=30)
+    def download_m3u8_content(self, playlist_url: Optional[str] = None, announce: bool = True) -> str:
+        """下载 M3U8 播放列表内容"""
+        target_url = playlist_url or self.m3u8_url
+        if announce:
+            print(f"[1/5] 正在下载播放列表: {target_url}")
+
+        response = self._get_session().get(target_url, timeout=30)
         response.raise_for_status()
 
         for encoding in ['utf-8', 'big5', 'gbk', 'gb2312', response.apparent_encoding]:
@@ -95,31 +126,72 @@ class M3U8Downloader:
         response.encoding = 'utf-8'
         return response.text
 
-    def parse_m3u8(self, m3u8_content: str) -> List[str]:
-        """解析 M3U8 内容，提取 TS 分片 URL"""
-        print("[2/5] 正在解析播放列表...")
+    def parse_m3u8(
+        self,
+        m3u8_content: str,
+        base_url: Optional[str] = None,
+        depth: int = 0,
+        visited: Optional[set[str]] = None
+    ) -> List[str]:
+        """解析 M3U8 内容，提取 TS 分片 URL。"""
+        current_url = base_url or self.m3u8_url
+        if depth == 0:
+            print("[2/5] 正在解析播放列表...")
 
-        lines = m3u8_content.split('\n')
+        if depth > self.MAX_PLAYLIST_DEPTH:
+            raise ValueError("M3U8 嵌套层级过深，已停止解析")
+
+        lines = m3u8_content.splitlines()
         if not lines or not lines[0].strip().upper().startswith('#EXTM3U'):
             raise ValueError("不是有效的 M3U8 文件")
 
         segments = []
+        child_playlists: List[Tuple[int, str]] = []
+        pending_bandwidth = -1
+
         for line in lines:
             line = line.strip()
-            if not line or (line.startswith('#') and not line.startswith('#EXT-X-KEY')):
+            if not line:
+                continue
+            if line.startswith('#EXT-X-STREAM-INF'):
+                match = re.search(r'BANDWIDTH=(\d+)', line, re.IGNORECASE)
+                pending_bandwidth = int(match.group(1)) if match else -1
+                continue
+            if line.startswith('#'):
                 continue
 
-            if not line.startswith('#'):
-                segment_url = line if line.startswith('http') else urljoin(self.m3u8_url, line)
-                segments.append(segment_url)
+            resource_url = line if line.startswith('http') else urljoin(current_url, line)
+            if pending_bandwidth >= 0 or self._is_m3u8_reference(line):
+                child_playlists.append((pending_bandwidth, resource_url))
+                pending_bandwidth = -1
+            else:
+                segments.append(resource_url)
 
-        self.total_segments = len(segments)
-        print(f"      找到 {self.total_segments} 个视频分片")
+        if segments:
+            self.total_segments = len(segments)
+            print(f"      找到 {self.total_segments} 个视频分片")
+            return segments
 
-        if self.total_segments == 0:
-            raise ValueError("未找到任何视频分片，可能是嵌套的 M3U8 列表")
+        if not child_playlists:
+            raise ValueError("未找到任何视频分片")
 
-        return segments
+        if visited is None:
+            visited = set()
+        visited.add(current_url)
+
+        child_playlists.sort(key=lambda item: item[0], reverse=True)
+        selected_bandwidth, selected_url = child_playlists[0]
+        if selected_url in visited:
+            raise ValueError("检测到循环引用的 M3U8 播放列表")
+
+        if len(child_playlists) > 1:
+            label = f"{selected_bandwidth}" if selected_bandwidth >= 0 else "未知"
+            print(f"      检测到多码率播放列表，已选择带宽最高的子流: {label}")
+        else:
+            print("      检测到嵌套播放列表，继续解析子列表...")
+
+        child_content = self.download_m3u8_content(selected_url, announce=False)
+        return self.parse_m3u8(child_content, base_url=selected_url, depth=depth + 1, visited=visited)
 
     def _download_single_segment(self, segment_url: str, index: int, update_progress: bool = True) -> Tuple[int, Optional[str]]:
         """下载单个分片"""
@@ -139,7 +211,7 @@ class M3U8Downloader:
                 return (index, None)
 
             try:
-                response = self.session.get(segment_url, timeout=30)
+                response = self._get_session().get(segment_url, timeout=30)
                 response.raise_for_status()
 
                 with open(filepath, 'wb') as f:
@@ -158,30 +230,33 @@ class M3U8Downloader:
                     time.sleep(self.retry_delay)
                 else:
                     print(f"\n      分片 {index} 下载失败（已重试{self.max_retries}次）: {e}")
-                    self.failed_segments += 1
+                    self._mark_segment_failed()
                     return (index, None)
 
         return (index, None)
 
     def _update_progress(self):
         """更新下载进度"""
-        self.downloaded_segments += 1
+        with self._stats_lock:
+            self.downloaded_segments += 1
+            downloaded = self.downloaded_segments
+            total = self.total_segments
 
         if self.start_time:
             elapsed = time.time() - self.start_time
             if elapsed > 0:
-                self.current_speed = self.downloaded_segments / elapsed
-                remaining = (self.total_segments - self.downloaded_segments) / self.current_speed if self.current_speed > 0 else 0
+                self.current_speed = downloaded / elapsed
+                remaining = (total - downloaded) / self.current_speed if self.current_speed > 0 else 0
                 speed_str = f"{self.current_speed:.1f}片/秒"
-                print(f"\r      下载进度: {self.downloaded_segments}/{self.total_segments} ({self.downloaded_segments/self.total_segments*100:.1f}%) | 速度: {speed_str} | 剩余: {remaining:.0f}秒", end='')
+                print(f"\r      下载进度: {downloaded}/{total} ({downloaded/total*100:.1f}%) | 速度: {speed_str} | 剩余: {remaining:.0f}秒", end='')
             else:
-                print(f"\r      下载进度: {self.downloaded_segments}/{self.total_segments}", end='')
+                print(f"\r      下载进度: {downloaded}/{total}", end='')
         else:
-            print(f"\r      下载进度: {self.downloaded_segments}/{self.total_segments}", end='')
+            print(f"\r      下载进度: {downloaded}/{total}", end='')
 
         if self.progress_callback:
             speed_str = f"{self.current_speed:.1f}片/秒" if self.current_speed > 0 else ""
-            self.progress_callback(self.downloaded_segments, self.total_segments, speed_str)
+            self.progress_callback(downloaded, total, speed_str)
 
     def download_all_segments(self, segment_urls: List[str]) -> List[str]:
         """并发下载所有 TS 分片"""
@@ -246,8 +321,8 @@ class M3U8Downloader:
                     if filepath:
                         results[index] = filepath
                         retry_success += 1
-                        self.failed_segments -= 1
-                        self.downloaded_segments += 1
+                        self._mark_segment_recovered()
+                        self._update_progress()
                     else:
                         batch_failed.append(index)
 
@@ -342,6 +417,13 @@ class M3U8Downloader:
         """停止下载"""
         self._stop_flag = True
 
+    def close(self):
+        """关闭内部 HTTP 会话。"""
+        with self._session_lock:
+            for session in self._sessions:
+                session.close()
+            self._sessions.clear()
+
     def download(self, auto_cleanup: bool = True):
         """执行完整的下载流程"""
         try:
@@ -382,7 +464,7 @@ class M3U8Downloader:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.session.close()
+        self.close()
         return False
 
 

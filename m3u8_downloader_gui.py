@@ -155,8 +155,9 @@ class M3U8DownloaderGUI:
     """M3U8 下载器图形界面"""
 
     MAX_LOG_LINES = 500
-    STARTABLE_STATUSES = ("等待中", "已暂停", "已失败", "已取消")
+    STARTABLE_STATUSES = ("等待中", "已失败", "已取消")
     FINISHED_STATUSES = ("已完成", "已失败", "已取消")
+    RETRYABLE_STATUSES = ("已失败", "已取消")
 
     def __init__(self, root: ttk.Window):
         self.root = root
@@ -716,7 +717,8 @@ class M3U8DownloaderGUI:
                 self.message_queue.put(('progress', task.task_id))
 
             task.downloader.progress_callback = progress_callback
-            task.downloader.download(auto_cleanup=True)
+            auto_cleanup = self.config_manager.get('auto_cleanup', True)
+            task.downloader.download(auto_cleanup=auto_cleanup)
 
             if task._stop_flag.is_set():
                 task.status = "已取消"
@@ -735,6 +737,8 @@ class M3U8DownloaderGUI:
                 self.message_queue.put(('error', task.task_id, str(e)))
 
         finally:
+            if task.downloader:
+                task.downloader.close()
             with self._lock:
                 self.active_downloads -= 1
             self.message_queue.put(('finish', task.task_id))
@@ -794,7 +798,7 @@ class M3U8DownloaderGUI:
 
     def _retry_failed(self):
         """重试失败的任务"""
-        failed_tasks = [t for t in self.tasks.values() if t.status in self.FINISHED_STATUSES]
+        failed_tasks = [t for t in self.tasks.values() if t.status in self.RETRYABLE_STATUSES]
 
         if not failed_tasks:
             self.msgbox.show_info("没有失败的任务需要重试", "提示")

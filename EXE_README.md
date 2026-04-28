@@ -1,24 +1,24 @@
-# 猫抓助手 - EXE 版本使用说明
+# M3U8 下载器 - EXE 版本使用说明
 
 ## 📦 打包信息
 
-- **文件名称**: `CatCatchAssistant.exe`
+- **文件名称**: `M3U8下载器.exe`
 - **文件大小**: 约 15 MB
-- **位置**: `dist/CatCatchAssistant.exe`
+- **位置**: `dist/M3U8下载器.exe`
 - **类型**: Windows 64位 GUI 应用程序（无控制台窗口）
 
 ## 🚀 使用方法
 
 ### 方式一：直接运行
-双击 `dist/CatCatchAssistant.exe` 即可启动图形界面。
+双击 `dist/M3U8下载器.exe` 即可启动图形界面。
 
 ### 方式二：创建桌面快捷方式
-1. 右键点击 `CatCatchAssistant.exe`
+1. 右键点击 `M3U8下载器.exe`
 2. 选择"发送到" → "桌面快捷方式"
 3. 以后可以从桌面直接启动
 
 ### 方式三：添加到开始菜单
-1. 将 `CatCatchAssistant.exe` 复制到 `C:\Program Files\CatCatchAssistant\`
+1. 将 `M3U8下载器.exe` 复制到 `C:\Program Files\M3U8下载器\`
 2. 创建快捷方式并放到开始菜单
 
 ## ⚙️ 系统要求
@@ -58,7 +58,7 @@
 python build_exe.py
 
 # 方式二：直接使用 PyInstaller
-pyinstaller CatCatchAssistant.spec
+pyinstaller M3U8下载器.spec
 ```
 
 ## 📂 文件结构
@@ -66,9 +66,9 @@ pyinstaller CatCatchAssistant.spec
 ```
 cat-catch-assistant/
 ├── dist/
-│   └── CatCatchAssistant.exe    # 打包后的可执行文件
+│   └── M3U8下载器.exe          # 打包后的可执行文件
 ├── build/                        # 打包临时文件（可删除）
-├── CatCatchAssistant.spec        # PyInstaller 配置文件
+├── M3U8下载器.spec              # PyInstaller 配置文件
 ├── build_exe.py                  # 打包脚本
 └── EXE_README.md                 # 本说明文档
 ```
@@ -126,19 +126,18 @@ VSVersionInfo(
 - 如果没有写入权限，会保存在用户目录
 
 ### Q4: 如何卸载？
-- 直接删除 `CatCatchAssistant.exe` 和 `config.json` 即可
+- 直接删除 `M3U8下载器.exe` 和 `config.json` 即可
 - 无需卸载程序，绿色便携
 
 ## 📊 打包参数说明
 
-当前使用的 PyInstaller 参数：
+当前默认使用 `M3U8下载器.spec` 打包，关键配置如下：
 
-- `--onefile`: 打包成单个 exe 文件
-- `--windowed`: 窗口模式，不显示控制台
-- `--clean`: 清理临时文件
+- `name='M3U8下载器'`: 默认输出中文文件名
+- `console=False`: 窗口模式，不显示控制台
+- `datas=[('icon.ico', '.')]`: 打包应用图标
+- `--clean`: 清理旧的构建缓存
 - `--noconfirm`: 覆盖输出不询问
-- `--hidden-import`: 确保所有依赖模块都被包含
-- `--exclude-module`: 排除不需要的模块以减小体积
 
 ## 📝 更新日志
 

@@ -75,8 +75,9 @@ test_temp/
 logs/
 
 # Project specific - Test files
-test_*.py
-check_*.py
+/test_*.py
+/check_*.py
+tests/tmp/
 
 # Project specific - Temporary
 *.tmp

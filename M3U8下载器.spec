@@ -6,11 +6,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('icon.ico', '.')],
-    hiddenimports=['tkinter', 'tkinter.ttk', 'tkinter.scrolledtext', 'tkinter.filedialog', 'tkinter.messagebox', 'requests', 'bs4', 'm3u8_downloader', 'config_manager'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'pandas', 'IPython', 'jupyter', 'selenium', 'webdriver_manager'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

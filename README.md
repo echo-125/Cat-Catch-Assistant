@@ -12,6 +12,7 @@ M3U8 视频下载工具，支持多任务并行下载、断点续传、自动重
 ## 功能特点
 
 - 自动解析 M3U8 播放列表
+- 支持主播放列表和嵌套 M3U8 自动解析
 - 多线程并发下载（可配置 1-64 线程）
 - 多任务并行下载（可配置最大并发数）
 - 断点续传、失败自动重试
@@ -38,6 +39,12 @@ python m3u8_downloader_gui.py
 python m3u8_downloader.py <M3U8_URL> [文件名] [保存路径]
 ```
 
+### 运行测试
+
+```bash
+python -m unittest discover -s tests
+```
+
 ## 项目结构
 
 ```
@@ -55,6 +62,8 @@ python m3u8_downloader.py <M3U8_URL> [文件名] [保存路径]
 pip install pyinstaller
 python build_exe.py
 ```
+
+默认输出文件为 `dist/M3U8下载器.exe`，打包配置使用 `M3U8下载器.spec`。
 
 ## 常见问题
 
