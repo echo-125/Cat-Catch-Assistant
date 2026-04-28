@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         猫抓助手
 // @namespace    http://tampermonkey.net/
-// @version      1.8
-// @description  自动点击播放按钮，并提取M3U8视频链接（带时长检测和请求头复制）
+// @version      2.0
+// @description  自动点击播放按钮，提取M3U8视频链接，支持多链接和分辨率选择
 // @author       Claude Code
 // @match        https://rouva4.xyz/*
 // @match        https://missav.live/*
@@ -28,14 +28,17 @@
         INIT_DELAY_MS: 2000,
         FETCH_TIMEOUT_MS: 10000,
         MAX_LOG_ITEMS: 60,
-        MAX_RESULT_ITEMS: 80
+        MAX_RESULT_ITEMS: 80,
+        URL_CHECK_MS: 500,
+        AD_WAIT_MS: 5000
     };
 
     const RETRY = { TIMES: 3 };
 
     const FILTER = {
         AD_KEYWORDS: ['ad', 'ads', 'adv', 'advertisement', 'silent-basis'],
-        TARGET_MARKERS: ['index.jpg', 'index.m3u8']
+        TARGET_MARKERS: ['index.jpg', 'index.m3u8'],
+        PLAYLIST_MARKERS: ['playlist', 'master', 'variant', 'list.m3u8']
     };
 
     // ==================== 网站配置 ====================
@@ -53,10 +56,13 @@
         pendingUrls: new Set(),
         durationCache: new Map(),
         requestHeaders: new Map(),
+        playlistVariants: new Map(), // 存储 playlist 的分辨率变体
         isMinimized: false,
         panelElement: null,
         videoCounter: 0,
-        originalDomain: window.location.hostname
+        originalDomain: window.location.hostname,
+        allowOpenOnce: false,
+        isJumpingBack: false
     };
 
     // 获取当前网站配置
@@ -144,6 +150,84 @@
         }
 
         return totalDuration;
+    }
+
+    // 解析 M3U8 playlist，提取分辨率/码率变体
+    function parseM3U8Playlist(content, baseUrl) {
+        if (!content || typeof content !== 'string') return null;
+
+        // 检查是否是 master playlist（包含多个流）
+        if (!content.includes('#EXT-X-STREAM-INF')) {
+            return null; // 不是 master playlist，是普通分片列表
+        }
+
+        const variants = [];
+        const lines = content.split('\n');
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+
+            // 解析 #EXT-X-STREAM-INF 行
+            if (line.startsWith('#EXT-X-STREAM-INF:')) {
+                const variant = {
+                    url: null,
+                    bandwidth: 0,
+                    resolution: null,
+                    codecs: null,
+                    frameRate: null
+                };
+
+                // 提取属性
+                const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+                if (bandwidthMatch) variant.bandwidth = parseInt(bandwidthMatch[1]);
+
+                const resolutionMatch = line.match(/RESOLUTION=([\d]+x[\d]+)/);
+                if (resolutionMatch) variant.resolution = resolutionMatch[1];
+
+                const codecsMatch = line.match(/CODECS="([^"]+)"/);
+                if (codecsMatch) variant.codecs = codecsMatch[1];
+
+                const frameRateMatch = line.match(/FRAME-RATE=([\d.]+)/);
+                if (frameRateMatch) variant.frameRate = parseFloat(frameRateMatch[1]);
+
+                // 下一行是 URL
+                if (i + 1 < lines.length) {
+                    const nextLine = lines[i + 1].trim();
+                    if (nextLine && !nextLine.startsWith('#')) {
+                        // 处理相对 URL
+                        if (nextLine.startsWith('http')) {
+                            variant.url = nextLine;
+                        } else {
+                            // 相对路径，拼接 baseUrl
+                            const base = baseUrl.substring(0, baseUrl.lastIndexOf('/') + 1);
+                            variant.url = base + nextLine;
+                        }
+                    }
+                }
+
+                if (variant.url) {
+                    variants.push(variant);
+                }
+            }
+        }
+
+        return variants.length > 0 ? variants : null;
+    }
+
+    // 格式化码率为可读字符串
+    function formatBandwidth(bps) {
+        if (bps >= 1000000) {
+            return `${(bps / 1000000).toFixed(1)} Mbps`;
+        } else if (bps >= 1000) {
+            return `${(bps / 1000).toFixed(0)} Kbps`;
+        }
+        return `${bps} bps`;
+    }
+
+    // 判断 URL 是否是 playlist 类型
+    function isPlaylistUrl(url) {
+        const urlLower = url.toLowerCase();
+        return FILTER.PLAYLIST_MARKERS.some(m => urlLower.includes(m));
     }
 
     async function getM3U8Duration(url, content = null) {
@@ -283,6 +367,9 @@
                 .m3u8-url-item.target {
                     background: #fff7ed; border-color: #fdba74;
                 }
+                .m3u8-url-item.playlist {
+                    background: #f0fdf4; border-color: #86efac;
+                }
                 .result-head {
                     display: flex; align-items: center; justify-content: space-between; gap: 10px;
                     margin-bottom: 8px;
@@ -317,6 +404,45 @@
                     background: #dbeafe; color: #1d4ed8;
                     padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
                 }
+                .playlist-badge {
+                    display: inline-flex; align-items: center;
+                    background: #dcfce7; color: #15803d;
+                    padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
+                }
+                /* 分辨率选择器样式 */
+                .variant-list {
+                    margin-top: 10px; border-top: 1px solid #e2e8f0;
+                    padding-top: 10px;
+                }
+                .variant-title {
+                    font-size: 12px; font-weight: 700; color: #0f172a;
+                    margin-bottom: 8px;
+                }
+                .variant-item {
+                    display: flex; align-items: center; justify-content: space-between;
+                    padding: 8px 10px; margin-bottom: 6px;
+                    background: #ffffff; border: 1px solid #e2e8f0;
+                    border-radius: 8px; cursor: pointer;
+                    transition: all 0.2s ease;
+                }
+                .variant-item:hover {
+                    border-color: #0f766e; background: #f0fdfa;
+                }
+                .variant-info {
+                    display: flex; flex-direction: column; gap: 2px;
+                }
+                .variant-resolution {
+                    font-size: 13px; font-weight: 700; color: #0f172a;
+                }
+                .variant-meta {
+                    font-size: 11px; color: #64748b;
+                }
+                .variant-copy-btn {
+                    padding: 6px 10px; background: #0f766e; color: white;
+                    border: none; border-radius: 6px; font-size: 11px;
+                    font-weight: 600; cursor: pointer;
+                }
+                .variant-copy-btn:hover { background: #115e59; }
                 .log-item {
                     font-size: 12px; color: #475569; margin: 0 0 8px;
                     padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 9px;
@@ -361,8 +487,8 @@
             <div id="m3u8-panel-full">
                 <div id="m3u8-panel-header">
                     <div id="m3u8-panel-title">
-                        <strong>猫抓助手 v1.7</strong>
-                        <span>自动嗅探视频链接并过滤短时资源</span>
+                        <strong>猫抓助手 v2.0</strong>
+                        <span>支持多链接和分辨率选择</span>
                     </div>
                     <div>
                         <span id="m3u8-panel-minimize" class="panel-btn" title="最小化">−</span>
@@ -441,30 +567,65 @@
         trimContainerChildren(contentEl, '.log-item', DURATION.MAX_LOG_ITEMS);
     }
 
-    async function addUrlToPanel(url, isTarget = false, duration = 0) {
+    async function addUrlToPanel(url, isTarget = false, duration = 0, variants = null) {
         const contentEl = document.getElementById('m3u8-result-list');
         if (!contentEl) return;
         const emptyState = contentEl.querySelector('.empty-state');
         if (emptyState) emptyState.remove();
 
         const item = document.createElement('div');
-        item.className = `m3u8-url-item ${isTarget ? 'target' : ''}`;
+        const isPlaylist = variants && variants.length > 0;
+        item.className = `m3u8-url-item ${isTarget ? 'target' : ''} ${isPlaylist ? 'playlist' : ''}`;
 
         const urlName = url.split('/').pop().split('?')[0];
         const durationStr = formatDuration(duration);
 
-        const urlType = isTarget ? '目标链接' : '视频链接';
+        const urlType = isTarget ? '目标链接' : (isPlaylist ? '播放列表' : '视频链接');
         const durationBadge = duration > 0
             ? `<span class="duration-badge">${durationStr}</span>`
             : '<span class="duration-badge" style="background:#e2e8f0;color:#475569">未知时长</span>';
 
+        const playlistBadge = isPlaylist
+            ? `<span class="playlist-badge">${variants.length}个分辨率</span>`
+            : '';
+
+        // 构建分辨率选择列表
+        let variantListHtml = '';
+        if (isPlaylist) {
+            // 按带宽降序排列
+            const sortedVariants = [...variants].sort((a, b) => b.bandwidth - a.bandwidth);
+
+            variantListHtml = `
+                <div class="variant-list">
+                    <div class="variant-title">选择分辨率：</div>
+                    ${sortedVariants.map((v, idx) => {
+                        const resolution = v.resolution || '未知';
+                        const bandwidth = formatBandwidth(v.bandwidth);
+                        const frameRate = v.frameRate ? `${v.frameRate}fps` : '';
+                        const meta = [bandwidth, frameRate].filter(Boolean).join(' · ');
+
+                        return `
+                            <div class="variant-item" data-url="${escapeHtml(v.url)}">
+                                <div class="variant-info">
+                                    <span class="variant-resolution">${resolution}</span>
+                                    <span class="variant-meta">${meta}</span>
+                                </div>
+                                <button class="variant-copy-btn">复制</button>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+        }
+
         item.innerHTML = `
             <div class="result-head">
-                <span class="result-type">${isTarget ? '◎' : '●'} ${urlType}</span>
-                ${durationBadge}
+                <span class="result-type">${isTarget ? '◎' : (isPlaylist ? '☰' : '●')} ${urlType}</span>
+                <div>${durationBadge}${playlistBadge}</div>
             </div>
             <div class="result-file">${escapeHtml(urlName)}</div>
             <div class="result-url">${escapeHtml(url.substring(0, 220))}${url.length > 220 ? '...' : ''}</div>
+            ${variantListHtml}
             <div class="result-actions">
                 <button class="copy-btn" data-url="${escapeHtml(url)}">复制链接</button>
                 ${isTarget ? '<button class="open-btn">打开链接</button>' : ''}
@@ -472,6 +633,23 @@
         `;
 
         item.querySelector('.copy-btn').onclick = () => copyUrlWithInfo(url, duration);
+
+        // 绑定分辨率复制按钮事件
+        if (isPlaylist) {
+            item.querySelectorAll('.variant-item').forEach(variantItem => {
+                const variantUrl = variantItem.dataset.url;
+                const copyBtn = variantItem.querySelector('.variant-copy-btn');
+
+                copyBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    copyUrlWithInfo(variantUrl, 0);
+                };
+
+                // 点击整行也复制
+                variantItem.onclick = () => copyUrlWithInfo(variantUrl, 0);
+            });
+        }
+
         if (isTarget) {
             item.querySelector('.open-btn')?.addEventListener('click', () => {
                 state.allowOpenOnce = true;
@@ -536,6 +714,8 @@
         state.pendingUrls.clear();
         state.durationCache.clear();
         state.requestHeaders.clear();
+        state.playlistVariants.clear();
+        state.videoCounter = 0;
         renderEmptyResults();
 
         if (config.autoClickPlay) {
@@ -549,6 +729,7 @@
         state.pendingUrls.clear();
         state.durationCache.clear();
         state.requestHeaders.clear();
+        state.playlistVariants.clear();
         renderEmptyResults();
         addLog('已清空列表');
     }
@@ -615,36 +796,6 @@
             }
         }, true);
 
-        // 移除广告 iframe
-        const removeAdIframes = throttle(() => {
-            document.querySelectorAll(SELECTORS.IFRAME).forEach(iframe => {
-                const src = iframe.getAttribute('src') || '';
-                if (src && !src.includes(state.originalDomain) && !src.includes('about:blank')) {
-                    iframe.remove();
-                    setTimeout(() => addLog('移除广告 iframe'), 0);
-                }
-            });
-        }, 500);
-
-        removeAdIframes();
-        setInterval(removeAdIframes, DURATION.IFRAME_CLEAN_MS);
-
-        // MutationObserver
-        new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const src = node.getAttribute?.('src') || '';
-                        if ((node.tagName === 'IFRAME' || node.tagName === 'SCRIPT') &&
-                            src && !src.includes(state.originalDomain) && !src.includes('about:blank')) {
-                            node.remove();
-                            setTimeout(() => addLog('移除动态广告元素'), 0);
-                        }
-                    }
-                }
-            }
-        }).observe(document.documentElement, { childList: true, subtree: true });
-
         log('广告拦截已启用');
     }
 
@@ -705,7 +856,40 @@
         state.pendingUrls.add(urlStr);
 
         try {
-            const duration = await getM3U8Duration(urlStr, responseText);
+            // 获取 m3u8 内容
+            let m3u8Content = responseText;
+            if (!m3u8Content) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), DURATION.FETCH_TIMEOUT_MS);
+                    const response = await fetch(urlStr, { signal: controller.signal });
+                    m3u8Content = await response.text();
+                    clearTimeout(timeoutId);
+                } catch (e) {
+                    log(`获取M3U8内容失败: ${e.message}`);
+                }
+            }
+
+            // 检查是否是 master playlist
+            const variants = parseM3U8Playlist(m3u8Content, urlStr);
+
+            if (variants && variants.length > 0) {
+                // 是 master playlist，存储变体信息
+                state.playlistVariants.set(urlStr, variants);
+                state.capturedUrls.add(urlStr);
+
+                if (currentSite.config.multiVideo) {
+                    state.videoCounter++;
+                }
+
+                updateStatus('✅ 已找到播放列表！');
+                await addUrlToPanel(urlStr, false, 0, variants);
+                addLog(`找到播放列表: ${urlStr.substring(0, 50)}... (${variants.length}个分辨率)`);
+                return;
+            }
+
+            // 普通 m3u8，计算时长
+            const duration = await getM3U8Duration(urlStr, m3u8Content);
             const isShort = duration > 0 && duration < config.minDuration;
             const isZero = duration === 0;
 
@@ -774,8 +958,7 @@
         }
 
         updateStatus('⚠️ 未找到播放按钮');
-        addLog('未找到播放按钮，已最小化面板');
-        setTimeout(minimizePanel, 1000);
+        addLog('未找到播放按钮，请手动点击播放');
         return false;
     }
 
@@ -829,7 +1012,7 @@
 
     // ==================== 主流程 ====================
     async function main() {
-        log('脚本已加载 v1.6');
+        log('脚本已加载 v2.0');
         blockAdRedirects();
 
         if (document.readyState === 'loading') {
@@ -838,9 +1021,10 @@
 
         if (config.showResult) {
             createResultPanel();
-            addLog('脚本已加载 v1.6');
+            addLog('脚本已加载 v2.0');
             addLog(`当前网站: ${currentSite.name}`);
             addLog(`最小时长过滤: ${config.minDuration}秒`);
+            addLog('支持多链接和分辨率选择');
             if (currentSite.config.multiVideo) addLog('多视频模式: 已启用');
         }
 
