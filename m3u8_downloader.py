@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import threading
+import json
 import requests
 import subprocess
 from pathlib import Path
@@ -37,7 +38,8 @@ class M3U8Downloader:
         m3u8_url: str,
         output_name: str = "output",
         max_workers: int = 16,
-        output_dir: str = "."
+        output_dir: str = ".",
+        request_headers: Optional[dict[str, str]] = None
     ):
         self.m3u8_url = m3u8_url
         self.output_name = self._sanitize_filename(output_name)
@@ -52,6 +54,8 @@ class M3U8Downloader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Charset': 'utf-8, big5, gb2312, gbk'
         }
+        self.request_headers = self._normalize_request_headers(request_headers)
+        self.headers.update(self.request_headers)
 
         self.total_segments = 0
         self.downloaded_segments = 0
@@ -69,6 +73,27 @@ class M3U8Downloader:
         self._session_lock = threading.Lock()
         self._thread_local = threading.local()
         self._sessions: list[requests.Session] = []
+
+    def _normalize_request_headers(self, headers: Optional[dict[str, str]]) -> dict[str, str]:
+        """规范化用户提供的请求头。"""
+        if not headers:
+            return {}
+
+        normalized = {}
+        for key, value in headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                normalized[key_str] = value_str
+        return normalized
+
+    def format_request_headers(self) -> str:
+        """格式化请求头，便于日志展示。"""
+        if not self.request_headers:
+            return "{}"
+        return json.dumps(self.request_headers, ensure_ascii=False)
 
     def _get_session(self) -> requests.Session:
         """为当前线程获取独立的 HTTP 会话。"""

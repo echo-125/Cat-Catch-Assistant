@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         猫抓助手
 // @namespace    http://tampermonkey.net/
-// @version      1.6
-// @description  自动点击播放按钮、跳过广告，拦截广告跳转，并提取M3U8视频链接（带时长检测）
+// @version      1.8
+// @description  自动点击播放按钮，并提取M3U8视频链接（带时长检测和请求头复制）
 // @author       Claude Code
 // @match        https://rouva4.xyz/*
+// @match        https://missav.live/*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
@@ -23,12 +24,11 @@
 
     const DURATION = {
         MIN_SECONDS: 90,
-        AD_WAIT_MS: 6000,
         RETRY_INTERVAL_MS: 1000,
-        URL_CHECK_MS: 100,
-        IFRAME_CLEAN_MS: 2000,
         INIT_DELAY_MS: 2000,
-        FETCH_TIMEOUT_MS: 10000
+        FETCH_TIMEOUT_MS: 10000,
+        MAX_LOG_ITEMS: 60,
+        MAX_RESULT_ITEMS: 80
     };
 
     const RETRY = { TIMES: 3 };
@@ -42,7 +42,6 @@
     const SITE_CONFIGS = {
         'rouva4.xyz': {
             needsPlayClick: true,
-            needsAdSkip: true,
             useIndexFilter: true,
             multiVideo: false
         }
@@ -51,12 +50,13 @@
     // ==================== 状态管理 ====================
     const state = {
         capturedUrls: new Set(),
+        pendingUrls: new Set(),
+        durationCache: new Map(),
+        requestHeaders: new Map(),
         isMinimized: false,
         panelElement: null,
         videoCounter: 0,
-        isJumpingBack: false,
-        originalDomain: window.location.hostname,
-        originalURL: window.location.href
+        originalDomain: window.location.hostname
     };
 
     // 获取当前网站配置
@@ -71,13 +71,42 @@
     const currentSite = getCurrentSiteConfig();
     const config = {
         autoClickPlay: currentSite.config.needsPlayClick,
-        autoSkipAd: currentSite.config.needsAdSkip,
         showResult: true,
         minDuration: DURATION.MIN_SECONDS
     };
 
     // ==================== 工具函数 ====================
     const log = (msg) => console.log(`[猫抓助手] ${msg}`);
+
+    function escapeHtml(text) {
+        return String(text).replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char]));
+    }
+
+    function trimContainerChildren(container, selector, maxItems) {
+        const items = container.querySelectorAll(selector);
+        if (items.length <= maxItems) return;
+        for (let i = items.length - 1; i >= maxItems; i--) {
+            items[i].remove();
+        }
+    }
+
+    function renderEmptyResults() {
+        const resultEl = document.getElementById('m3u8-result-list');
+        if (!resultEl) return;
+        resultEl.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">◎</div>
+                <div class="empty-state-title">等待捕获链接</div>
+                <div class="empty-state-text">播放视频后会自动显示可用的 M3U8 地址</div>
+            </div>
+        `;
+    }
 
     function formatDuration(seconds) {
         const h = Math.floor(seconds / 3600);
@@ -105,19 +134,39 @@
     }
 
     // ==================== M3U8 时长获取 ====================
-    async function getM3U8Duration(url) {
+    function parseM3U8Duration(content) {
+        if (!content || typeof content !== 'string') return 0;
+        let totalDuration = 0;
+
+        for (const line of content.split('\n')) {
+            const match = line.trim().match(/#EXTINF:([\d.]+)/);
+            if (match) totalDuration += parseFloat(match[1]);
+        }
+
+        return totalDuration;
+    }
+
+    async function getM3U8Duration(url, content = null) {
+        if (content) {
+            const parsedDuration = parseM3U8Duration(content);
+            if (parsedDuration > 0) {
+                state.durationCache.set(url, parsedDuration);
+            }
+            return parsedDuration;
+        }
+
+        if (state.durationCache.has(url)) {
+            return state.durationCache.get(url);
+        }
+
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), DURATION.FETCH_TIMEOUT_MS);
 
         try {
             const response = await fetch(url, { signal: controller.signal });
             const content = await response.text();
-            let totalDuration = 0;
-
-            for (const line of content.split('\n')) {
-                const match = line.trim().match(/#EXTINF:([\d.]+)/);
-                if (match) totalDuration += parseFloat(match[1]);
-            }
+            const totalDuration = parseM3U8Duration(content);
+            state.durationCache.set(url, totalDuration);
             return totalDuration;
         } catch (error) {
             log(`获取时长失败: ${error.message}`);
@@ -154,88 +203,200 @@
             <style>
                 #m3u8-result-panel {
                     position: fixed; top: 20px; right: 20px;
-                    width: 500px; max-height: 600px;
-                    background: white; border: 2px solid #4CAF50; border-radius: 8px;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                    z-index: 999999; font-family: Arial, sans-serif;
+                    width: 420px; height: min(720px, calc(100vh - 40px));
+                    background: #ffffff; border: 1px solid rgba(15, 23, 42, 0.08); border-radius: 14px;
+                    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+                    z-index: 999999; font-family: "Segoe UI", Arial, sans-serif;
                     overflow: hidden; transition: all 0.3s ease;
+                    color: #0f172a;
+                    backdrop-filter: blur(10px);
                 }
                 #m3u8-result-panel.minimized {
-                    width: 60px; height: 60px; max-height: 60px;
-                    border-radius: 50%; cursor: pointer;
+                    width: 58px; height: 58px; max-height: 58px;
+                    border-radius: 18px; cursor: pointer;
                 }
                 #m3u8-panel-header {
-                    background: #4CAF50; color: white;
-                    padding: 12px; font-weight: bold;
+                    background: linear-gradient(135deg, #0f766e 0%, #0f9f8f 100%);
+                    color: white;
+                    padding: 14px 16px 12px;
                     display: flex; justify-content: space-between; align-items: center;
                 }
-                .panel-btn { cursor: pointer; font-size: 18px; color: white; margin-right: 10px; }
-                #m3u8-panel-close { font-size: 20px; margin-right: 0; }
-                #m3u8-panel-content { padding: 15px; max-height: 450px; overflow-y: auto; }
-                .m3u8-url-item {
-                    background: #f5f5f5; padding: 10px; margin: 8px 0;
-                    border-radius: 4px; border-left: 3px solid #4CAF50;
-                    word-break: break-all;
+                #m3u8-panel-title {
+                    display: flex; flex-direction: column; gap: 3px;
                 }
-                .m3u8-url-item.target { border-left-color: #FF5722; background: #fff3e0; }
-                .m3u8-url-item.filtered { border-left-color: #999; background: #f0f0f0; opacity: 0.6; }
-                .m3u8-url-item button {
-                    background: #4CAF50; color: white; border: none;
-                    padding: 5px 10px; border-radius: 3px; cursor: pointer;
-                    margin-top: 5px; margin-right: 5px;
+                #m3u8-panel-title strong {
+                    font-size: 15px; font-weight: 700; letter-spacing: 0;
                 }
-                .m3u8-url-item button:hover { background: #45a049; }
-                .duration-badge {
-                    display: inline-block; background: #2196F3; color: white;
-                    padding: 2px 8px; border-radius: 12px; font-size: 11px; margin-left: 5px;
+                #m3u8-panel-title span {
+                    font-size: 12px; color: rgba(255,255,255,0.82);
+                }
+                .panel-btn {
+                    width: 30px; height: 30px; border-radius: 9px;
+                    display: inline-flex; align-items: center; justify-content: center;
+                    cursor: pointer; font-size: 18px; color: white; margin-left: 6px;
+                    background: rgba(255,255,255,0.14);
+                    transition: background 0.2s ease;
+                    user-select: none;
+                }
+                .panel-btn:hover { background: rgba(255,255,255,0.24); }
+                #m3u8-panel-body {
+                    display: flex; flex-direction: column; height: calc(100% - 66px);
+                    background: #f8fafc;
                 }
                 #m3u8-status {
-                    padding: 10px; background: #e3f2fd;
-                    border-bottom: 1px solid #ddd; font-size: 14px;
+                    margin: 12px 12px 10px; padding: 10px 12px; background: #ecfeff;
+                    border: 1px solid #bae6fd; border-radius: 10px; font-size: 13px; color: #0f766e;
+                }
+                #m3u8-panel-main {
+                    display: grid; grid-template-rows: minmax(180px, 1fr) 140px;
+                    gap: 10px; padding: 0 12px 12px; min-height: 0; flex: 1;
+                }
+                .panel-section {
+                    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
+                    min-height: 0; overflow: hidden;
+                }
+                .panel-section-header {
+                    display: flex; justify-content: space-between; align-items: center;
+                    padding: 12px 14px 10px; border-bottom: 1px solid #eef2f7;
+                    background: #fcfdff;
+                }
+                .panel-section-title {
+                    font-size: 13px; font-weight: 700; color: #0f172a;
+                }
+                .panel-section-meta {
+                    font-size: 11px; color: #64748b;
+                }
+                .panel-section-body {
+                    padding: 10px 12px 12px; overflow-y: auto; max-height: 100%;
+                }
+                .panel-section-body::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .panel-section-body::-webkit-scrollbar-thumb {
+                    background: #cbd5e1; border-radius: 999px;
+                }
+                .m3u8-url-item {
+                    background: #f8fafc; padding: 12px; margin: 0 0 10px;
+                    border-radius: 10px; border: 1px solid #dbe4ee;
+                    word-break: break-all;
+                }
+                .m3u8-url-item.target {
+                    background: #fff7ed; border-color: #fdba74;
+                }
+                .result-head {
+                    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                    margin-bottom: 8px;
+                }
+                .result-type {
+                    font-size: 13px; font-weight: 700; color: #0f172a;
+                }
+                .result-file {
+                    font-size: 12px; color: #475569; margin-bottom: 6px;
+                }
+                .result-url {
+                    font-size: 11px; line-height: 1.5; color: #64748b;
+                    background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px;
+                    padding: 8px 9px;
+                }
+                .result-actions {
+                    display: flex; gap: 8px; margin-top: 10px;
+                }
+                .result-actions button,
+                .panel-controls button {
+                    border: none; border-radius: 9px; cursor: pointer;
+                    font-size: 12px; font-weight: 600; transition: all 0.2s ease;
+                }
+                .result-actions button {
+                    padding: 8px 11px; background: #0f766e; color: white;
+                }
+                .result-actions button:hover { background: #115e59; }
+                .result-actions .open-btn { background: #ea580c; }
+                .result-actions .open-btn:hover { background: #c2410c; }
+                .duration-badge {
+                    display: inline-flex; align-items: center;
+                    background: #dbeafe; color: #1d4ed8;
+                    padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700;
                 }
                 .log-item {
-                    font-size: 12px; color: #666; margin: 5px 0;
-                    padding: 5px; background: #f9f9f9; border-radius: 3px;
+                    font-size: 12px; color: #475569; margin: 0 0 8px;
+                    padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 9px;
+                    line-height: 1.45;
                 }
                 #m3u8-minimized-icon {
-                    display: none; width: 60px; height: 60px;
-                    background: #4CAF50; border-radius: 50%;
+                    display: none; width: 58px; height: 58px;
+                    background: linear-gradient(135deg, #0f766e 0%, #0f9f8f 100%);
+                    border-radius: 18px;
                     align-items: center; justify-content: center;
                     font-size: 24px; color: white; cursor: pointer;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
                 }
                 #m3u8-minimized-icon.show { display: flex; }
                 .panel-controls {
-                    display: flex; gap: 10px; margin-top: 10px;
-                    padding: 10px; background: #f5f5f5; border-top: 1px solid #ddd;
+                    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+                    padding: 0 12px 12px;
                 }
                 .panel-controls button {
-                    flex: 1; padding: 8px; background: #2196F3; color: white;
-                    border: none; border-radius: 4px; cursor: pointer; font-size: 13px;
+                    padding: 10px 12px; background: #e2e8f0; color: #0f172a;
                 }
-                .panel-controls button:hover { background: #1976D2; }
-                .panel-controls button.resniff { background: #FF5722; }
-                .panel-controls button.resniff:hover { background: #E64A19; }
+                .panel-controls button:hover { background: #cbd5e1; }
+                .panel-controls button.resniff { background: #0f766e; color: white; }
+                .panel-controls button.resniff:hover { background: #115e59; }
+                .empty-state {
+                    display: flex; flex-direction: column; align-items: center; justify-content: center;
+                    text-align: center; min-height: 150px; color: #64748b; padding: 20px 12px;
+                }
+                .empty-state-icon {
+                    width: 42px; height: 42px; border-radius: 14px; background: #e2e8f0;
+                    display: flex; align-items: center; justify-content: center;
+                    font-size: 20px; color: #334155; margin-bottom: 10px;
+                }
+                .empty-state-title {
+                    font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 4px;
+                }
+                .empty-state-text {
+                    font-size: 12px; line-height: 1.5;
+                }
             </style>
             <div id="m3u8-minimized-icon" title="点击展开">🐱</div>
             <div id="m3u8-panel-full">
                 <div id="m3u8-panel-header">
-                    <span>猫抓助手 v1.6</span>
+                    <div id="m3u8-panel-title">
+                        <strong>猫抓助手 v1.7</strong>
+                        <span>自动嗅探视频链接并过滤短时资源</span>
+                    </div>
                     <div>
                         <span id="m3u8-panel-minimize" class="panel-btn" title="最小化">−</span>
                         <span id="m3u8-panel-close" class="panel-btn" title="关闭">×</span>
                     </div>
                 </div>
-                <div id="m3u8-status">正在监控...</div>
-                <div id="m3u8-panel-content"><p>等待捕获链接...</p></div>
-                <div class="panel-controls">
-                    <button id="m3u8-resniff-btn" class="resniff">🔄 重新嗅探</button>
-                    <button id="m3u8-clear-btn">🗑️ 清空列表</button>
+                <div id="m3u8-panel-body">
+                    <div id="m3u8-status">正在监控...</div>
+                    <div id="m3u8-panel-main">
+                        <section class="panel-section">
+                            <div class="panel-section-header">
+                                <span class="panel-section-title">捕获结果</span>
+                                <span class="panel-section-meta">最新结果优先显示</span>
+                            </div>
+                            <div id="m3u8-result-list" class="panel-section-body"></div>
+                        </section>
+                        <section class="panel-section">
+                            <div class="panel-section-header">
+                                <span class="panel-section-title">运行日志</span>
+                                <span class="panel-section-meta">保留最近 60 条</span>
+                            </div>
+                            <div id="m3u8-log-list" class="panel-section-body"></div>
+                        </section>
+                    </div>
+                    <div class="panel-controls">
+                        <button id="m3u8-resniff-btn" class="resniff">重新嗅探</button>
+                        <button id="m3u8-clear-btn">清空列表</button>
+                    </div>
                 </div>
             </div>
         `;
         document.body.appendChild(panel);
         state.panelElement = panel;
+        renderEmptyResults();
 
         // 事件绑定
         document.getElementById('m3u8-panel-close').onclick = () => panel.style.display = 'none';
@@ -271,17 +432,20 @@
     }
 
     function addLog(message) {
-        const contentEl = document.getElementById('m3u8-panel-content');
+        const contentEl = document.getElementById('m3u8-log-list');
         if (!contentEl) { log(message); return; }
         const logItem = document.createElement('div');
         logItem.className = 'log-item';
         logItem.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-        contentEl.appendChild(logItem);
+        contentEl.insertBefore(logItem, contentEl.firstChild);
+        trimContainerChildren(contentEl, '.log-item', DURATION.MAX_LOG_ITEMS);
     }
 
     async function addUrlToPanel(url, isTarget = false, duration = 0) {
-        const contentEl = document.getElementById('m3u8-panel-content');
+        const contentEl = document.getElementById('m3u8-result-list');
         if (!contentEl) return;
+        const emptyState = contentEl.querySelector('.empty-state');
+        if (emptyState) emptyState.remove();
 
         const item = document.createElement('div');
         item.className = `m3u8-url-item ${isTarget ? 'target' : ''}`;
@@ -289,32 +453,78 @@
         const urlName = url.split('/').pop().split('?')[0];
         const durationStr = formatDuration(duration);
 
-        const urlType = isTarget ? '✅ 目标链接 (index.jpg)' : '📹 视频链接';
+        const urlType = isTarget ? '目标链接' : '视频链接';
         const durationBadge = duration > 0
             ? `<span class="duration-badge">${durationStr}</span>`
-            : '<span class="duration-badge" style="background:#999">未知时长</span>';
+            : '<span class="duration-badge" style="background:#e2e8f0;color:#475569">未知时长</span>';
 
         item.innerHTML = `
-            <div><strong>${urlType}</strong>${durationBadge}</div>
-            <div style="font-size: 12px; color: #666; margin: 5px 0;">${urlName}</div>
-            <div style="font-size: 11px; color: #999; word-break: break-all;">${url.substring(0, 150)}${url.length > 150 ? '...' : ''}</div>
-            <button class="copy-btn" data-url="${url}">复制链接</button>
-            ${isTarget ? '<button class="open-btn" style="background: #FF5722;">打开链接</button>' : ''}
+            <div class="result-head">
+                <span class="result-type">${isTarget ? '◎' : '●'} ${urlType}</span>
+                ${durationBadge}
+            </div>
+            <div class="result-file">${escapeHtml(urlName)}</div>
+            <div class="result-url">${escapeHtml(url.substring(0, 220))}${url.length > 220 ? '...' : ''}</div>
+            <div class="result-actions">
+                <button class="copy-btn" data-url="${escapeHtml(url)}">复制链接</button>
+                ${isTarget ? '<button class="open-btn">打开链接</button>' : ''}
+            </div>
         `;
 
         item.querySelector('.copy-btn').onclick = () => copyUrlWithInfo(url, duration);
         if (isTarget) {
-            item.querySelector('.open-btn')?.addEventListener('click', () => window.open(url));
+            item.querySelector('.open-btn')?.addEventListener('click', () => {
+                state.allowOpenOnce = true;
+                window.open(url, '_blank', 'noopener,noreferrer');
+            });
         }
 
         contentEl.insertBefore(item, contentEl.firstChild);
+        trimContainerChildren(contentEl, '.m3u8-url-item', DURATION.MAX_RESULT_ITEMS);
+    }
+
+    function buildRequestHeaders(url, headers = {}) {
+        const normalized = {};
+        for (const [key, value] of Object.entries(headers || {})) {
+            if (key && value) {
+                normalized[String(key).toLowerCase()] = String(value);
+            }
+        }
+
+        const pageUrl = window.location.href;
+        const pageOrigin = window.location.origin;
+        if (!normalized.origin) normalized.origin = pageOrigin;
+        if (!normalized.referer) normalized.referer = pageUrl;
+
+        state.requestHeaders.set(url, normalized);
+        return normalized;
+    }
+
+    function extractFetchHeaders(inputHeaders) {
+        if (!inputHeaders) return {};
+
+        if (inputHeaders instanceof Headers) {
+            return Object.fromEntries(inputHeaders.entries());
+        }
+
+        if (Array.isArray(inputHeaders)) {
+            return Object.fromEntries(inputHeaders);
+        }
+
+        if (typeof inputHeaders === 'object') {
+            return { ...inputHeaders };
+        }
+
+        return {};
     }
 
     function copyUrlWithInfo(url, duration) {
         const title = getPageTitle(currentSite.config.multiVideo ? state.videoCounter : null);
-        const text = `${url}|${title}`;
+        const headers = buildRequestHeaders(url, state.requestHeaders.get(url));
+        const headersJson = JSON.stringify(headers);
+        const text = `${url}|${title}|${headersJson}`;
         navigator.clipboard.writeText(text).then(() => {
-            alert(`已复制！\n\n文件名: ${title}\n链接: ${url.substring(0, 50)}...`);
+            alert(`已复制！\n\n文件名: ${title}\n请求头: ${headersJson}\n链接: ${url.substring(0, 50)}...`);
             addLog('已复制: ' + title);
         }).catch(() => alert('复制失败，请手动复制'));
     }
@@ -323,8 +533,10 @@
         addLog('开始重新嗅探...');
         updateStatus('正在重新嗅探...');
         state.capturedUrls.clear();
-        const contentEl = document.getElementById('m3u8-panel-content');
-        if (contentEl) contentEl.innerHTML = '<p>等待捕获链接...</p>';
+        state.pendingUrls.clear();
+        state.durationCache.clear();
+        state.requestHeaders.clear();
+        renderEmptyResults();
 
         if (config.autoClickPlay) {
             const playClicked = await clickPlayButton();
@@ -334,8 +546,10 @@
 
     function clearResults() {
         state.capturedUrls.clear();
-        const contentEl = document.getElementById('m3u8-panel-content');
-        if (contentEl) contentEl.innerHTML = '<p>等待捕获链接...</p>';
+        state.pendingUrls.clear();
+        state.durationCache.clear();
+        state.requestHeaders.clear();
+        renderEmptyResults();
         addLog('已清空列表');
     }
 
@@ -344,6 +558,10 @@
         // 拦截 window.open
         const originalOpen = window.open;
         window.open = (url) => {
+            if (state.allowOpenOnce) {
+                state.allowOpenOnce = false;
+                return originalOpen.call(window, url, '_blank', 'noopener,noreferrer');
+            }
             log(`拦截 window.open: ${url}`);
             setTimeout(() => addLog('拦截广告弹窗: ' + url?.substring(0, 50)), 0);
             return null;
@@ -432,16 +650,37 @@
 
     // ==================== 网络请求拦截 ====================
     function interceptNetworkRequests() {
+        const originalXHRSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        XMLHttpRequest.prototype.setRequestHeader = function(key, value) {
+            if (!this._m3u8RequestHeaders) this._m3u8RequestHeaders = {};
+            this._m3u8RequestHeaders[key] = value;
+            return originalXHRSetRequestHeader.apply(this, arguments);
+        };
+
         const originalXHROpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url) {
-            this.addEventListener('load', () => handleUrl(url));
+            this.addEventListener('load', () => {
+                const responseText = typeof this.responseText === 'string' ? this.responseText : null;
+                handleUrl(url, {
+                    responseText,
+                    requestHeaders: this._m3u8RequestHeaders || {}
+                });
+            });
             return originalXHROpen.apply(this, arguments);
         };
 
         const originalFetch = window.fetch;
         window.fetch = function(url, options) {
+            const requestHeaders = extractFetchHeaders(options?.headers);
             return originalFetch.apply(this, arguments).then(response => {
-                handleUrl(url);
+                const urlStr = url?.toString?.() || '';
+                if (urlStr.includes('.m3u8')) {
+                    response.clone().text()
+                        .then(text => handleUrl(url, { responseText: text, requestHeaders }))
+                        .catch(() => handleUrl(url, { requestHeaders }));
+                } else {
+                    handleUrl(url, { requestHeaders });
+                }
                 return response;
             });
         };
@@ -449,21 +688,27 @@
         log('网络请求拦截已启用');
     }
 
-    async function handleUrl(url) {
+    async function handleUrl(url, options = {}) {
         if (!url) return;
         const urlStr = url.toString();
+        const responseText = options.responseText || null;
+        buildRequestHeaders(urlStr, options.requestHeaders || {});
 
         const shouldCapture = currentSite.config.useIndexFilter
             ? urlStr.includes('.m3u8') || urlStr.includes('.jpg') || urlStr.includes('index')
             : urlStr.includes('.m3u8');
 
-        if (shouldCapture && !state.capturedUrls.has(urlStr)) {
-            // 先获取时长，过滤短视频
-            const duration = await getM3U8Duration(url);
+        if (!shouldCapture || state.capturedUrls.has(urlStr) || state.pendingUrls.has(urlStr)) {
+            return;
+        }
+
+        state.pendingUrls.add(urlStr);
+
+        try {
+            const duration = await getM3U8Duration(urlStr, responseText);
             const isShort = duration > 0 && duration < config.minDuration;
             const isZero = duration === 0;
 
-            // 过滤：时长为0或过短的链接不显示
             if (isZero || isShort) {
                 log(`过滤链接: ${urlStr.substring(0, 50)}... (时长: ${formatDuration(duration)})`);
                 return;
@@ -484,6 +729,8 @@
                 const label = currentSite.config.multiVideo ? `视频${state.videoCounter}: ` : '';
                 addLog(`捕获${label}链接: ${urlStr.substring(0, 50)}... (时长: ${formatDuration(duration)})`);
             }
+        } finally {
+            state.pendingUrls.delete(urlStr);
         }
     }
 
